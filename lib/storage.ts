@@ -50,6 +50,14 @@ export function getKnowledgeFilePath(evaluationTypeId: number, filename: string)
   return path.join(getKnowledgeDir(evaluationTypeId), path.basename(filename));
 }
 
+export function getVectorsDir(evaluationTypeId: number): string {
+  const dir = path.join(getDataDir(), String(evaluationTypeId), "vectors");
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
 export function readFileContent(filePath: string): string {
   if (!fs.existsSync(filePath)) return "";
   return fs.readFileSync(filePath, "utf-8");

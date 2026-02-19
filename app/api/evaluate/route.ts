@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 import { buildSystemContext } from "@/lib/build-context";
-import { streamChat } from "@/lib/groq";
+import { streamChat } from "@/lib/openrouter";
 
 export const dynamic = "force-dynamic";
 
 const EVALUATE_USER_PROMPT = `
-Genera el informe de evaluación completo según las instrucciones y la rúbrica proporcionadas. 
+Genera el informe de evaluación completo según las instrucciones y la rúbrica proporcionadas.
 Incluye todas las secciones indicadas: notas por criterio, índices si aplican, y justificación.
-Responde ÚNICAMENTE con el contenido del informe, sin introducciones ni comentarios previos.
+Genera cada sección UNA SOLA VEZ; no repitas párrafos ni bloques de texto.
+No uses nunca las etiquetas <think> ni </think>; responde únicamente con el contenido del informe, sin introducciones ni comentarios previos.
 `.trim();
 
 export async function POST(request: Request) {
@@ -17,37 +18,28 @@ export async function POST(request: Request) {
     const projectFilePaths = Array.isArray(body?.projectFilePaths)
       ? (body.projectFilePaths as string[]).filter((p: unknown) => typeof p === "string")
       : [];
+    const projectElementsTable = Array.isArray(body?.projectElementsTable)
+      ? (body.projectElementsTable as { element?: string; content?: string }[]).filter(
+          (r) => r && typeof r.element === "string"
+        ).map((r) => ({ element: r.element!, content: typeof r.content === "string" ? r.content : "" }))
+      : undefined;
 
     if (!Number.isInteger(evaluationTypeId) || evaluationTypeId < 1) {
       return NextResponse.json({ error: "evaluationTypeId required" }, { status: 400 });
     }
 
-    const systemContent = await buildSystemContext(evaluationTypeId, projectFilePaths);
+    const systemContent = await buildSystemContext(evaluationTypeId, projectFilePaths, {
+      projectElementsTable: projectElementsTable?.length ? projectElementsTable : undefined,
+    });
+    const noThink =
+      "Responde solo con el informe. No uses etiquetas <think> ni </think> en tu respuesta.\n\n";
     const systemMessage =
-      systemContent ||
-      "Eres un evaluador de proyectos. Genera un informe de evaluación con notas, criterios y justificación según la rúbrica.";
+      noThink + (systemContent || "Eres un evaluador de proyectos. Genera un informe de evaluación con notas, criterios y justificación según la rúbrica.");
 
     const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
       { role: "system", content: systemMessage },
       { role: "user", content: EVALUATE_USER_PROMPT },
     ];
-
-    // #region agent log
-    const systemContentLen = systemMessage.length;
-    const userContentLen = EVALUATE_USER_PROMPT.length;
-    const totalChars = systemContentLen + userContentLen;
-    fetch("http://127.0.0.1:7243/ingest/2cfbb0df-8ae8-4230-9f25-74fe2cc0dcdd", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        location: "evaluate/route.ts:POST",
-        message: "Messages before streamChat",
-        data: { systemContentLen, userContentLen, totalChars, messageCount: messages.length },
-        timestamp: Date.now(),
-        hypothesisId: "H1,H2,H4",
-      }),
-    }).catch(() => {});
-    // #endregion
 
     const stream = streamChat(messages);
 
@@ -59,20 +51,7 @@ export async function POST(request: Request) {
             controller.enqueue(encoder.encode(chunk));
           }
         } catch (err) {
-          // #region agent log
           const errMsg = err instanceof Error ? err.message : String(err);
-          fetch("http://127.0.0.1:7243/ingest/2cfbb0df-8ae8-4230-9f25-74fe2cc0dcdd", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              location: "evaluate/route.ts:stream catch",
-              message: "Stream error captured",
-              data: { errorMessage: errMsg },
-              timestamp: Date.now(),
-              hypothesisId: "H5",
-            }),
-          }).catch(() => {});
-          // #endregion
           controller.enqueue(encoder.encode(`[Error: ${errMsg}]`));
         } finally {
           controller.close();

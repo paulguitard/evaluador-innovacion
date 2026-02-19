@@ -20,6 +20,7 @@ export default function ChatPanel({
   activeTypeId,
   projectFilePaths,
   onProjectFilePathsChange,
+  projectElementsTable,
   sessionId,
 }: {
   messages: ChatMessage[];
@@ -29,6 +30,7 @@ export default function ChatPanel({
   activeTypeId: number | null;
   projectFilePaths: string[];
   onProjectFilePathsChange: (paths: string[]) => void;
+  projectElementsTable: { element: string; content: string }[];
   sessionId: string;
 }) {
   const [input, setInput] = useState("");
@@ -52,6 +54,7 @@ export default function ChatPanel({
           evaluationTypeId: activeTypeId,
           message: text,
           projectFilePaths,
+          projectElementsTable: projectElementsTable?.length ? projectElementsTable : undefined,
           messages: messages.slice(0, -1),
         }),
       });
@@ -99,6 +102,7 @@ export default function ChatPanel({
         body: JSON.stringify({
           evaluationTypeId: activeTypeId,
           projectFilePaths,
+          projectElementsTable: projectElementsTable?.length ? projectElementsTable : undefined,
         }),
       });
       if (!res.ok) {
@@ -113,7 +117,7 @@ export default function ChatPanel({
           const { done, value } = await reader.read();
           if (done) break;
           accumulated += decoder.decode(value, { stream: true });
-          onReportContentChange(accumulated);
+          onReportContentChange(stripThinkBlocks(accumulated));
         }
       }
       onMessagesChange((prev) => [...prev, { role: "assistant", content: "Informe listo en el panel derecho." }]);
@@ -155,36 +159,6 @@ export default function ChatPanel({
   return (
     <div className="flex h-full flex-col bg-gray-50 dark:bg-[#1e1e1e]">
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-        {projectFilePaths.length > 0 && (
-          <div className="mb-3 rounded-lg border border-gray-200 bg-white p-3 dark:border-gray-600 dark:bg-gray-800">
-            <p className="mb-2 text-xs font-medium text-gray-500 dark:text-gray-400">
-              Archivos del proyecto ({projectFilePaths.length})
-            </p>
-            <ul className="space-y-1.5">
-              {projectFilePaths.map((path, idx) => (
-                <li
-                  key={path}
-                  className="flex items-center justify-between gap-2 rounded bg-gray-100 py-1.5 pl-2 pr-1 dark:bg-gray-700"
-                >
-                  <span className="min-w-0 truncate text-sm text-gray-700 dark:text-gray-200" title={path}>
-                    {displayName(path)}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => onProjectFilePathsChange(projectFilePaths.filter((_, i) => i !== idx))}
-                    className="shrink-0 rounded p-1 text-gray-500 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-600 dark:hover:text-gray-200"
-                    title="Quitar archivo"
-                    aria-label="Quitar archivo"
-                  >
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
         {messages.length === 0 && (
           <p className="text-sm text-gray-500 dark:text-gray-400">
             {activeTypeId
@@ -214,6 +188,37 @@ export default function ChatPanel({
           </div>
         ))}
       </div>
+      {projectFilePaths.length > 0 && (
+        <div className="shrink-0 border-t border-gray-200 px-4 py-1.5 dark:border-gray-700">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              Archivos del proyecto ({projectFilePaths.length}):
+            </span>
+            {projectFilePaths.map((path, idx) => (
+              <span
+                key={path}
+                className="inline-flex max-w-[180px] items-center gap-1 rounded bg-gray-100 py-0.5 pl-1.5 pr-0.5 dark:bg-gray-700/80"
+                title={path}
+              >
+                <span className="min-w-0 truncate text-xs text-gray-600 dark:text-gray-300">
+                  {displayName(path)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onProjectFilePathsChange(projectFilePaths.filter((_, i) => i !== idx))}
+                  className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-200"
+                  title="Quitar archivo"
+                  aria-label="Quitar archivo"
+                >
+                  <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-gray-200 px-4 py-3 dark:border-gray-700">
         <input
           type="text"

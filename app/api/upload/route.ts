@@ -9,6 +9,7 @@ import {
 } from "@/lib/storage";
 import { getConfig, updateConfig } from "@/lib/db";
 import { getSupportedExtensions } from "@/lib/document-parser";
+import { indexKnowledge } from "@/lib/rag-index";
 
 export type KnowledgeEntry = { name: string; url: string };
 
@@ -59,6 +60,7 @@ export async function POST(request: Request) {
         })();
         const newEntries: KnowledgeEntry[] = [...current.filter((e): e is KnowledgeEntry => typeof e === "object" && e?.name != null && e?.url != null), ...uploaded];
         await updateConfig(typeId, { knowledge_paths: newEntries });
+        indexKnowledge(typeId).catch(() => {});
         return NextResponse.json({ saved: uploaded.map((u) => u.name), knowledge_paths: newEntries });
       }
 
@@ -78,6 +80,7 @@ export async function POST(request: Request) {
       const currentPaths = config?.knowledge_paths ? (() => { try { return JSON.parse(config.knowledge_paths) as string[]; } catch { return []; } })() : [];
       const newPaths = [...new Set([...currentPaths, ...saved])];
       await updateConfig(typeId, { knowledge_paths: newPaths });
+      indexKnowledge(typeId).catch(() => {});
       return NextResponse.json({ saved, knowledge_paths: newPaths });
     }
 

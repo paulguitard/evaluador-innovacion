@@ -11,21 +11,6 @@ function usePostgres(): boolean {
 }
 
 function getDb(): DatabaseSync {
-  // #region agent log
-  if (typeof fetch === "function") {
-    fetch("http://127.0.0.1:7243/ingest/2cfbb0df-8ae8-4230-9f25-74fe2cc0dcdd", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        location: "lib/db.ts:getDb",
-        message: "getDb called",
-        data: { cwd: process.cwd(), dbPath },
-        timestamp: Date.now(),
-        hypothesisId: "H3",
-      }),
-    }).catch(() => {});
-  }
-  // #endregion
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
@@ -46,9 +31,27 @@ function initDbSync() {
       prompt TEXT DEFAULT '',
       knowledge_paths TEXT DEFAULT '[]',
       rubric_path TEXT DEFAULT '',
+      elements TEXT DEFAULT '[]',
+      instructions TEXT DEFAULT '',
+      report_format TEXT DEFAULT '',
+      rubric_prompt TEXT DEFAULT '',
       FOREIGN KEY (evaluation_type_id) REFERENCES evaluation_types(id) ON DELETE CASCADE
     );
   `);
+  // Migration: add new columns to existing tables (ignore if already present)
+  const alterColumns = [
+    "ALTER TABLE evaluation_type_config ADD COLUMN elements TEXT DEFAULT '[]'",
+    "ALTER TABLE evaluation_type_config ADD COLUMN instructions TEXT DEFAULT ''",
+    "ALTER TABLE evaluation_type_config ADD COLUMN report_format TEXT DEFAULT ''",
+    "ALTER TABLE evaluation_type_config ADD COLUMN rubric_prompt TEXT DEFAULT ''",
+  ];
+  for (const sql of alterColumns) {
+    try {
+      db.exec(sql);
+    } catch {
+      // Column already exists
+    }
+  }
 }
 
 export type ConfigRow = {
@@ -56,6 +59,10 @@ export type ConfigRow = {
   prompt: string;
   knowledge_paths: string;
   rubric_path: string;
+  elements: string;
+  instructions: string;
+  report_format: string;
+  rubric_prompt: string;
 };
 
 export type EvaluationTypeRow = {
@@ -105,7 +112,9 @@ export async function createEvaluationType(name: string): Promise<number> {
   const insert = db.prepare("INSERT INTO evaluation_types (name) VALUES (?)");
   const runResult = insert.run(name) as { lastInsertRowid: number };
   const id = Number(runResult.lastInsertRowid);
-  db.prepare("INSERT INTO evaluation_type_config (evaluation_type_id, prompt) VALUES (?, '')").run(id);
+  db.prepare(
+    "INSERT INTO evaluation_type_config (evaluation_type_id, prompt, elements, instructions, report_format, rubric_prompt) VALUES (?, '', '[]', '', '', '')"
+  ).run(id);
   return id;
 }
 
@@ -135,34 +144,59 @@ export async function getConfig(evaluationTypeId: number): Promise<ConfigRow | n
   const db = getDb();
   const row = db
     .prepare(
-      "SELECT evaluation_type_id, prompt, knowledge_paths, rubric_path FROM evaluation_type_config WHERE evaluation_type_id = ?"
+      "SELECT evaluation_type_id, prompt, knowledge_paths, rubric_path, elements, instructions, report_format, rubric_prompt FROM evaluation_type_config WHERE evaluation_type_id = ?"
     )
     .get(evaluationTypeId) as ConfigRow | undefined;
-  return row ?? null;
+  if (!row) return null;
+  return {
+    ...row,
+    elements: (row as ConfigRow & { elements?: string }).elements ?? "[]",
+    instructions: (row as ConfigRow & { instructions?: string }).instructions ?? "",
+    report_format: (row as ConfigRow & { report_format?: string }).report_format ?? "",
+    rubric_prompt: (row as ConfigRow & { rubric_prompt?: string }).rubric_prompt ?? "",
+  };
 }
 
-export async function updateConfig(
-  evaluationTypeId: number,
-  data: { prompt?: string; knowledge_paths?: (string | { name: string; url: string })[]; rubric_path?: string }
-): Promise<void> {
+export type ConfigUpdateData = {
+  prompt?: string;
+  knowledge_paths?: (string | { name: string; url: string })[];
+  rubric_path?: string;
+  elements?: string | { title: string; description: string }[];
+  instructions?: string;
+  report_format?: string;
+  rubric_prompt?: string;
+};
+
+export async function updateConfig(evaluationTypeId: number, data: ConfigUpdateData): Promise<void> {
   if (usePostgres()) {
     await pg.updateConfigPostgres(evaluationTypeId, data);
     return;
   }
   const db = getDb();
   const current = db
-    .prepare("SELECT prompt, knowledge_paths, rubric_path FROM evaluation_type_config WHERE evaluation_type_id = ?")
-    .get(evaluationTypeId) as { prompt: string; knowledge_paths: string; rubric_path: string } | undefined;
+    .prepare(
+      "SELECT prompt, knowledge_paths, rubric_path, elements, instructions, report_format, rubric_prompt FROM evaluation_type_config WHERE evaluation_type_id = ?"
+    )
+    .get(evaluationTypeId) as ConfigRow | undefined;
   if (!current) return;
   const prompt = data.prompt !== undefined ? data.prompt : current.prompt;
   const knowledge_paths =
     data.knowledge_paths !== undefined ? JSON.stringify(data.knowledge_paths) : current.knowledge_paths;
   const rubric_path = data.rubric_path !== undefined ? data.rubric_path : current.rubric_path;
+  const elements =
+    data.elements !== undefined
+      ? typeof data.elements === "string"
+        ? data.elements
+        : JSON.stringify(data.elements)
+      : current.elements;
+  const instructions = data.instructions !== undefined ? data.instructions : current.instructions;
+  const report_format = data.report_format !== undefined ? data.report_format : current.report_format;
+  const rubric_prompt = data.rubric_prompt !== undefined ? data.rubric_prompt : current.rubric_prompt;
   db
     .prepare(
-      "UPDATE evaluation_type_config SET prompt = ?, knowledge_paths = ?, rubric_path = ? WHERE evaluation_type_id = ?"
+      "UPDATE evaluation_type_config SET prompt = ?, knowledge_paths = ?, rubric_path = ?, elements = ?, instructions = ?, report_format = ?, rubric_prompt = ? WHERE evaluation_type_id = ?"
     )
-    .run(prompt, knowledge_paths, rubric_path, evaluationTypeId);
+    .run(prompt, knowledge_paths, rubric_path, elements, instructions, report_format, rubric_prompt, evaluationTypeId);
 }
 
 export { getDb };

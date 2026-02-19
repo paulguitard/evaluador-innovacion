@@ -16,20 +16,6 @@ export async function* streamChat(
 ): AsyncGenerator<string, void, unknown> {
   const client = getGroqClient();
   const maxTokens = options?.max_tokens ?? 8192;
-  const totalContentChars = messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0);
-  // #region agent log
-  fetch("http://127.0.0.1:7243/ingest/2cfbb0df-8ae8-4230-9f25-74fe2cc0dcdd", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      location: "groq.ts:streamChat",
-      message: "Before chat.completions.create",
-      data: { totalContentChars, messageCount: messages.length, max_tokens: maxTokens },
-      timestamp: Date.now(),
-      hypothesisId: "H2,H5",
-    }),
-  }).catch(() => {});
-  // #endregion
   let stream;
   try {
     stream = await client.chat.completions.create({
@@ -40,20 +26,6 @@ export async function* streamChat(
       max_tokens: maxTokens,
     });
   } catch (createErr) {
-    // #region agent log
-    const createErrMsg = createErr instanceof Error ? createErr.message : String(createErr);
-    fetch("http://127.0.0.1:7243/ingest/2cfbb0df-8ae8-4230-9f25-74fe2cc0dcdd", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        location: "groq.ts:streamChat create error",
-        message: "chat.completions.create threw",
-        data: { errorMessage: createErrMsg },
-        timestamp: Date.now(),
-        hypothesisId: "H5",
-      }),
-    }).catch(() => {});
-    // #endregion
     throw createErr;
   }
 
