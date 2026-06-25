@@ -10,6 +10,7 @@ import {
 import { getConfig, updateConfig } from "@/lib/db";
 import { getSupportedExtensions } from "@/lib/document-parser";
 import { indexKnowledge } from "@/lib/rag-index";
+import { indexProjectFiles } from "@/lib/project-rag-index";
 
 export const maxDuration = 300;
 
@@ -150,7 +151,22 @@ export async function POST(request: Request) {
         fs.writeFileSync(filepath, buf);
         saved.push({ name: filename, path: filepath });
       }
-      return NextResponse.json({ saved: saved.map((s) => s.name), paths: saved.map((s) => s.path) });
+      let projectChunkCount: number | undefined;
+      let projectIndexError: string | undefined;
+      if (saved.length > 0) {
+        try {
+          const result = await indexProjectFiles(sessionId, saved.map((s) => s.path));
+          projectChunkCount = result.chunkCount;
+        } catch (e) {
+          projectIndexError = e instanceof Error ? e.message : String(e);
+        }
+      }
+      return NextResponse.json({
+        saved: saved.map((s) => s.name),
+        paths: saved.map((s) => s.path),
+        projectChunkCount,
+        projectIndexError,
+      });
     }
 
     return NextResponse.json({ error: "Invalid kind" }, { status: 400 });

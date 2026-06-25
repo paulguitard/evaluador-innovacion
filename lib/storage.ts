@@ -58,6 +58,16 @@ export function getVectorsDir(evaluationTypeId: number): string {
   return dir;
 }
 
+/** Índice RAG de archivos del proyecto (por sesión, separado del Knowledge). */
+export function getProjectVectorsDir(sessionId: string): string {
+  const safe = sessionId.replace(/[^a-zA-Z0-9._-]/g, "_") || "default";
+  const dir = path.join(getSessionDir(safe), "vectors");
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
 export function readFileContent(filePath: string): string {
   if (!fs.existsSync(filePath)) return "";
   return fs.readFileSync(filePath, "utf-8");

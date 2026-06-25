@@ -6,8 +6,19 @@ import ChatPanel from "@/components/ChatPanel";
 import ReportPanel from "@/components/ReportPanel";
 import ConfigPanel from "@/components/ConfigPanel";
 import FullscreenOverlay, { ExpandIcon } from "@/components/FullscreenOverlay";
+import ProjectExtractedTable from "@/components/ProjectExtractedTable";
 import type { ChatMessage } from "@/components/ChatPanel";
+import type { AgentTraceEntry } from "@/lib/agent-events";
 import type { ProjectStructuredData } from "@/lib/build-context";
+import {
+  applyExtractStreamEvent,
+  createExtractStreamState,
+  formatExtractCompletionMessage,
+  knowledgePathsToLabels,
+  parseExtractNdjsonLine,
+} from "@/lib/extract-stream";
+import type { ExtractStreamEvent } from "@/lib/project-extract-pipeline";
+import { createStaggeredTraceReveal } from "@/lib/trace-reveal";
 
 type EvaluationType = { id: number; name: string };
 
@@ -45,13 +56,21 @@ export default function Home() {
   const [reportTitle, setReportTitle] = useState("TITULO DEL INFORME DE EVALUACIÓN");
   const [projectFilePaths, setProjectFilePaths] = useState<string[]>([]);
   const [extractedProjectText, setExtractedProjectText] = useState("");
-  const [extractedProjectTable, setExtractedProjectTable] = useState<{ section?: string; element: string; content: string }[]>([]);
+  const [extractedProjectTable, setExtractedProjectTable] = useState<
+    { section?: string; element: string; content: string; incomplete?: boolean }[]
+  >([]);
   const [extractedStructuredData, setExtractedStructuredData] = useState<ProjectStructuredData | null>(null);
   const [extractedProjectLoading, setExtractedProjectLoading] = useState(false);
   const [elementsWithSection, setElementsWithSection] = useState<{ title: string; section: string }[]>([]);
+  const [knowledgeDocNames, setKnowledgeDocNames] = useState<string[]>([]);
   const [projectSectionOpen, setProjectSectionOpen] = useState(true);
   const [fullscreenSection, setFullscreenSection] = useState<"project" | "report" | null>(null);
   const prevActiveTypeIdRef = useRef<number | null>(null);
+  const extractRevealRef = useRef<ReturnType<typeof createStaggeredTraceReveal> | null>(null);
+  const knowledgeDocNamesRef = useRef<string[]>([]);
+  const extractCompletionPendingRef = useRef<string | null>(null);
+  const extractTraceMsgIndexRef = useRef(-1);
+  const extractFullTraceRef = useRef<AgentTraceEntry[]>([]);
 
   /** Al cambiar de tipo de evaluación, limpiar la UI principal (chat, informe, proyecto). */
   useEffect(() => {
@@ -87,25 +106,38 @@ export default function Home() {
   }, [activeTypeId, evaluationTypes]);
 
   useEffect(() => {
+    knowledgeDocNamesRef.current = knowledgeDocNames;
+  }, [knowledgeDocNames]);
+
+  useEffect(() => {
     if (!activeTypeId) {
       setElementsWithSection([]);
+      setKnowledgeDocNames([]);
       return;
     }
-    fetch(`/api/config/${activeTypeId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        const elements = Array.isArray(data.elements) ? data.elements : [];
-        const mapped = elements
-          .filter((e: unknown) => typeof e === "object" && e != null && "title" in e)
-          .map((e: { title?: string; section?: string }) => ({
-            title: String((e as { title: string }).title ?? "").trim(),
-            section: typeof (e as { section?: string }).section === "string" ? ((e as { section: string }).section ?? "General").trim() : "General",
-          }))
-          .filter((e) => e.title);
-        setElementsWithSection(mapped);
-      })
-      .catch(() => setElementsWithSection([]));
-  }, [activeTypeId]);
+    const loadConfig = () => {
+      fetch(`/api/config/${activeTypeId}`)
+        .then((r) => r.json())
+        .then((data) => {
+          const elements = Array.isArray(data.elements) ? data.elements : [];
+          const mapped = elements
+            .filter((e: unknown) => typeof e === "object" && e != null && "title" in e)
+            .map((e: { title?: string; section?: string }) => ({
+              title: String((e as { title: string }).title ?? "").trim(),
+              section: typeof (e as { section?: string }).section === "string" ? ((e as { section: string }).section ?? "General").trim() : "General",
+            }))
+            .filter((e: { title: string }) => e.title);
+          setElementsWithSection(mapped);
+          const paths = Array.isArray(data.knowledge_paths) ? data.knowledge_paths : [];
+          setKnowledgeDocNames(knowledgePathsToLabels(paths));
+        })
+        .catch(() => {
+          setElementsWithSection([]);
+          setKnowledgeDocNames([]);
+        });
+    };
+    loadConfig();
+  }, [activeTypeId, configOpen]);
 
   const MAX_EXTRACT_RETRIES = 5;
   const EXTRACT_RETRY_DELAY_MS = 3000;
@@ -122,8 +154,123 @@ export default function Home() {
     let cancelled = false;
     let currentController: AbortController | null = null;
 
+    const applyDonePayload = (event: Extract<ExtractStreamEvent, { type: "done" }>) => {
+      const text = typeof event.text === "string" ? event.text : "";
+      const table = Array.isArray(event.elementsTable)
+        ? event.elementsTable.map((r) => ({
+            section: r.section,
+            element: r.element,
+            content: r.content,
+            incomplete: r.incomplete,
+          }))
+        : [];
+      const sd = event.structuredData;
+      setExtractedProjectText(text);
+      setExtractedProjectTable(table);
+      setExtractedStructuredData(sd && "files" in sd && sd.files?.length ? sd : null);
+      setExtractedProjectLoading(false);
+    };
+
+    const appendExtractCompletion = () => {
+      const msg = extractCompletionPendingRef.current;
+      if (!msg) return;
+      extractCompletionPendingRef.current = null;
+      const fullTrace = extractFullTraceRef.current;
+
+      setMessages((prev) => {
+        const next = [...prev];
+        const traceIdx = extractTraceMsgIndexRef.current;
+        if (traceIdx >= 0 && traceIdx < next.length && next[traceIdx]?.role === "assistant") {
+          next[traceIdx] = {
+            ...next[traceIdx],
+            trace: fullTrace.map((t) => ({ ...t, live: false })),
+            traceRevealing: false,
+            content: "",
+          };
+        }
+        const alreadyHas = next.some(
+          (m, i) =>
+            i !== traceIdx &&
+            m.role === "assistant" &&
+            m.content === msg &&
+            !(m.trace?.length || m.traceRevealing)
+        );
+        if (!alreadyHas) {
+          next.push({ role: "assistant", content: msg });
+        }
+        return next;
+      });
+
+      extractRevealRef.current?.destroy();
+      extractRevealRef.current = null;
+      extractTraceMsgIndexRef.current = -1;
+    };
+
+    const startExtractMessage = () => {
+      extractRevealRef.current?.destroy();
+      extractTraceMsgIndexRef.current = -1;
+      extractFullTraceRef.current = [];
+      const reveal = createStaggeredTraceReveal((revealed) => {
+        setMessages((prev) => {
+          const next = [...prev];
+          const traceIdx = extractTraceMsgIndexRef.current;
+          if (traceIdx < 0 || traceIdx >= next.length || next[traceIdx]?.role !== "assistant") {
+            return next;
+          }
+          next[traceIdx] = {
+            ...next[traceIdx],
+            content: "",
+            trace: revealed.trace,
+            traceRevealing: revealed.revealing,
+          };
+          return next;
+        });
+        if (!revealed.revealing && extractCompletionPendingRef.current) {
+          appendExtractCompletion();
+        }
+      });
+      reveal.onFullyRevealed(() => {
+        if (extractCompletionPendingRef.current) {
+          appendExtractCompletion();
+        }
+      });
+      extractRevealRef.current = reveal;
+      setMessages((prev) => {
+        const next: ChatMessage[] = [
+          ...prev,
+          { role: "assistant", content: "", trace: [], traceRevealing: true },
+        ];
+        extractTraceMsgIndexRef.current = next.length - 1;
+        return next;
+      });
+      return reveal;
+    };
+
+    const processExtractEvent = (
+      event: ExtractStreamEvent,
+      streamState: ReturnType<typeof createExtractStreamState>,
+      reveal: ReturnType<typeof createStaggeredTraceReveal>,
+      live: boolean
+    ) => {
+      if (event.type === "error") throw new Error(event.error);
+      const nextState = applyExtractStreamEvent(streamState, event, live);
+      const trace = nextState.trace.map((t) => ({ ...t, live: live && t.live }));
+      extractFullTraceRef.current = trace;
+      if (event.type === "done") {
+        extractCompletionPendingRef.current = formatExtractCompletionMessage(
+          knowledgeDocNamesRef.current
+        );
+        applyDonePayload(event);
+      }
+      reveal.setState(trace, "");
+      return nextState;
+    };
+
     const doFetch = (attempt: number) => {
       if (cancelled) return;
+      extractCompletionPendingRef.current = null;
+      const reveal = startExtractMessage();
+      let streamState = createExtractStreamState();
       currentController = new AbortController();
       fetch("/api/project-extract", {
         method: "POST",
@@ -131,6 +278,7 @@ export default function Home() {
         body: JSON.stringify({
           projectFilePaths,
           evaluationTypeId: activeTypeId ?? undefined,
+          sessionId: SESSION_ID,
           stream: true,
         }),
         signal: currentController.signal,
@@ -151,98 +299,56 @@ export default function Home() {
             const lines = buffer.split("\n");
             buffer = lines.pop() ?? "";
             for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-              try {
-                const data = JSON.parse(trimmed) as {
-                  type: string;
-                  message?: string;
-                  name?: string;
-                  text?: string;
-                  error?: string;
-                  elementsTable?: { element: string; content: string }[];
-                  structuredData?: ProjectStructuredData;
-                };
-                if (data.type === "step" && typeof data.message === "string") {
-                  setMessages((prev) => {
-                    const next = [...prev];
-                    const last = next[next.length - 1];
-                    if (last?.role === "assistant") next[next.length - 1] = { ...last, content: data.message! };
-                    else next.push({ role: "assistant", content: data.message! });
-                    return next;
-                  });
-                } else if (data.type === "element" && typeof data.name === "string") {
-                  setMessages((prev) => {
-                    const next = [...prev];
-                    const last = next[next.length - 1];
-                    if (last?.role === "assistant" && (last.content.endsWith("…") || last.content.includes("Identificando"))) {
-                      const sep = last.content.endsWith("…") ? "\n\n" : "\n";
-                      next[next.length - 1] = { ...last, content: last.content + sep + data.name + " ✓" };
-                    }
-                    return next;
-                  });
-                } else if (data.type === "done") {
-                  const text = typeof data.text === "string" ? data.text : "";
-                  const table = Array.isArray(data.elementsTable)
-                    ? (data.elementsTable as { section?: string; element: string; content: string }[]).map((r) => ({
-                        section: r.section,
-                        element: r.element,
-                        content: r.content,
-                      }))
-                    : [];
-                  const sd = data.structuredData;
-                  setExtractedProjectText(text);
-                  setExtractedProjectTable(table);
-                  setExtractedStructuredData(sd?.files?.length ? sd : null);
-                  setMessages((prev) => [...prev, { role: "assistant", content: "Extracción completada." }]);
-                  setExtractedProjectLoading(false);
-                } else if (data.type === "error" && data.error) {
-                  throw new Error(data.error);
-                }
-              } catch (e) {
-                if (e instanceof SyntaxError) continue;
-                throw e;
-              }
+              const event = parseExtractNdjsonLine(line);
+              if (!event) continue;
+              streamState = processExtractEvent(event, streamState, reveal, true);
             }
           }
           if (buffer.trim()) {
-            try {
-              const data = JSON.parse(buffer.trim()) as {
-                type: string;
-                text?: string;
-                error?: string;
-                elementsTable?: { element: string; content: string }[];
-                structuredData?: ProjectStructuredData;
-              };
-              if (data.type === "done") {
-                setExtractedProjectText(typeof data.text === "string" ? data.text : "");
-                const table = Array.isArray(data.elementsTable)
-                  ? (data.elementsTable as { section?: string; element: string; content: string }[]).map((r) => ({
-                      section: r.section,
-                      element: r.element,
-                      content: r.content,
-                    }))
-                  : [];
-                const sd = data.structuredData;
-                setExtractedProjectTable(table);
-                setExtractedStructuredData(sd?.files?.length ? sd : null);
-                setMessages((prev) => [...prev, { role: "assistant", content: "Extracción completada." }]);
-                setExtractedProjectLoading(false);
-              }
-              if (data.type === "error" && data.error) throw new Error(data.error);
-            } catch (e) {
-              if (!(e instanceof SyntaxError)) throw e;
+            const event = parseExtractNdjsonLine(buffer);
+            if (event) {
+              streamState = processExtractEvent(event, streamState, reveal, false);
             }
+          }
+          if (!extractCompletionPendingRef.current) {
+            extractCompletionPendingRef.current = formatExtractCompletionMessage(
+              knowledgeDocNamesRef.current
+            );
+            streamState = applyExtractStreamEvent(streamState, { type: "done", text: "" }, false);
+            extractFullTraceRef.current = streamState.trace;
+            reveal.setState(streamState.trace, "");
+          }
+          if (extractCompletionPendingRef.current) {
+            reveal.onFullyRevealed(() => {
+              if (extractCompletionPendingRef.current) {
+                appendExtractCompletion();
+              }
+            });
           }
         })
         .catch((err) => {
+          extractCompletionPendingRef.current = null;
+          extractRevealRef.current?.flushAll();
           setExtractedProjectText("");
           setExtractedProjectTable([]);
           setExtractedStructuredData(null);
           const msg = err?.message?.includes("429")
             ? "Extracción fallida: límite de uso temporal. Reintente en unos momentos."
             : "Extracción fallida.";
-          setMessages((prev) => [...prev, { role: "assistant", content: msg }]);
+          setMessages((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === "assistant" && last.traceRevealing) {
+              next[next.length - 1] = {
+                ...last,
+                content: msg,
+                traceRevealing: false,
+              };
+            } else {
+              next.push({ role: "assistant", content: msg });
+            }
+            return next;
+          });
           if (
             attempt < MAX_EXTRACT_RETRIES - 1 &&
             err?.message?.includes("429") &&
@@ -252,7 +358,10 @@ export default function Home() {
               if (cancelled) return;
               setMessages((prev) => [
                 ...prev,
-                { role: "assistant", content: `Reintentando extracción (intento ${attempt + 2}/${MAX_EXTRACT_RETRIES})…` },
+                {
+                  role: "assistant",
+                  content: `Reintentando extracción (intento ${attempt + 2}/${MAX_EXTRACT_RETRIES})…`,
+                },
               ]);
               doFetch(attempt + 1);
             }, EXTRACT_RETRY_DELAY_MS);
@@ -263,13 +372,12 @@ export default function Home() {
     };
 
     setExtractedProjectLoading(true);
-    setMessages((prev) => [...prev, { role: "assistant", content: "Extrayendo información…" }]);
-    setMessages((prev) => [...prev, { role: "assistant", content: "Detectando y organizando…" }]);
     doFetch(0);
 
     return () => {
       cancelled = true;
       currentController?.abort();
+      extractRevealRef.current?.destroy();
     };
   }, [projectFilePaths, activeTypeId]);
 
@@ -295,7 +403,6 @@ export default function Home() {
             projectElementsTable={extractedProjectTable}
             projectStructuredData={extractedStructuredData ?? undefined}
             sessionId={SESSION_ID}
-            extractionLoading={extractedProjectLoading}
           />
         </div>
         <div className="flex min-w-0 flex-1 flex-col">
@@ -326,72 +433,28 @@ export default function Home() {
               </div>
               {projectSectionOpen && (
                 <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 text-sm text-gray-800 dark:text-gray-200">
-                  {extractedProjectLoading
-                    ? "Extrayendo con IA…"
-                    : (() => {
-                        const getSectionForElement = (elementName: string) => {
-                          const found = elementsWithSection.find((e) => e.title === elementName.trim());
-                          return found?.section ?? "—";
-                        };
-                        const rawRows: { section: string; element: string; content: string }[] =
-                          extractedProjectTable.length > 0
-                            ? extractedProjectTable.map((r) => ({
-                                section: r.section ?? getSectionForElement(r.element),
-                                element: r.element,
-                                content: r.content,
-                              }))
-                            : parseElementoContenido(extractedProjectText?.trim() || "").map(([elem, cont]) => ({
-                                section: getSectionForElement(elem),
-                                element: elem,
-                                content: cont,
-                              }));
-                        // Ordenar por sección (orden de primera aparición) y luego por elemento dentro de cada sección (como en Config)
-                        const sectionOrder: string[] = [];
-                        for (const e of elementsWithSection) {
-                          if (!sectionOrder.includes(e.section)) sectionOrder.push(e.section);
-                        }
-                        const titleOrder: string[] = [];
-                        for (const sec of sectionOrder) {
-                          for (const e of elementsWithSection) {
-                            if (e.section === sec) titleOrder.push(e.title);
-                          }
-                        }
-                        const rowsOrdered: { section: string; element: string; content: string }[] = [];
-                        for (const title of titleOrder) {
-                          const row = rawRows.find((r) => r.element.trim() === title);
-                          if (row) rowsOrdered.push(row);
-                        }
-                        const used = new Set(rowsOrdered.map((r) => r.element));
-                        for (const row of rawRows) {
-                          if (!used.has(row.element)) rowsOrdered.push(row);
-                        }
-                        const rowsWithSection = rowsOrdered;
-                        if (rowsWithSection.length === 0) {
-                          const t = extractedProjectText?.trim() || "";
-                          if (!t) return "Sube archivos del proyecto para ver aquí el texto extraído.";
-                          return <pre className="whitespace-pre-wrap font-sans">{t}</pre>;
-                        }
-                        return (
-                          <table className="w-full border-collapse border border-gray-300 dark:border-gray-600">
-                            <thead>
-                              <tr className="bg-gray-100 dark:bg-gray-800">
-                                <th className="border border-gray-300 px-3 py-2 text-left font-semibold dark:border-gray-600">Sección</th>
-                                <th className="border border-gray-300 px-3 py-2 text-left font-semibold dark:border-gray-600">Elemento</th>
-                                <th className="border border-gray-300 px-3 py-2 text-left font-semibold dark:border-gray-600">Contenido</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {rowsWithSection.map((row, i) => (
-                                <tr key={i} className="border-b border-gray-200 dark:border-gray-700">
-                                  <td className="border border-gray-300 px-3 py-2 align-top dark:border-gray-600">{row.section}</td>
-                                  <td className="border border-gray-300 px-3 py-2 align-top dark:border-gray-600">{row.element}</td>
-                                  <td className="border border-gray-300 px-3 py-2 align-top dark:border-gray-600 whitespace-pre-wrap">{row.content}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        );
-                      })()}
+                  {extractedProjectLoading ? (
+                    "Extrayendo con IA…"
+                  ) : (
+                    <ProjectExtractedTable
+                      rows={
+                        extractedProjectTable.length > 0
+                          ? extractedProjectTable.map((r) => ({
+                              section: r.section ?? "—",
+                              element: r.element,
+                              content: r.content,
+                              incomplete: r.incomplete,
+                            }))
+                          : parseElementoContenido(extractedProjectText?.trim() || "").map(([elem, cont]) => ({
+                              section: "—",
+                              element: elem,
+                              content: cont,
+                            }))
+                      }
+                      elementsWithSection={elementsWithSection}
+                      extractedProjectText={extractedProjectText}
+                    />
+                  )}
                 </div>
               )}
             </div>
@@ -416,71 +479,28 @@ export default function Home() {
       {fullscreenSection === "project" && (
         <FullscreenOverlay title="Proyecto extraído" onClose={() => setFullscreenSection(null)}>
           <div className="text-sm text-gray-800 dark:text-gray-200">
-            {extractedProjectLoading
-              ? "Extrayendo con IA…"
-              : (() => {
-                  const getSectionForElement = (elementName: string) => {
-                    const found = elementsWithSection.find((e) => e.title === elementName.trim());
-                    return found?.section ?? "—";
-                  };
-                  const rawRows: { section: string; element: string; content: string }[] =
-                    extractedProjectTable.length > 0
-                      ? extractedProjectTable.map((r) => ({
-                          section: r.section ?? getSectionForElement(r.element),
-                          element: r.element,
-                          content: r.content,
-                        }))
-                      : parseElementoContenido(extractedProjectText?.trim() || "").map(([elem, cont]) => ({
-                          section: getSectionForElement(elem),
-                          element: elem,
-                          content: cont,
-                        }));
-                  const sectionOrder: string[] = [];
-                  for (const e of elementsWithSection) {
-                    if (!sectionOrder.includes(e.section)) sectionOrder.push(e.section);
-                  }
-                  const titleOrder: string[] = [];
-                  for (const sec of sectionOrder) {
-                    for (const e of elementsWithSection) {
-                      if (e.section === sec) titleOrder.push(e.title);
-                    }
-                  }
-                  const rowsOrdered: { section: string; element: string; content: string }[] = [];
-                  for (const title of titleOrder) {
-                    const row = rawRows.find((r) => r.element.trim() === title);
-                    if (row) rowsOrdered.push(row);
-                  }
-                  const used = new Set(rowsOrdered.map((r) => r.element));
-                  for (const row of rawRows) {
-                    if (!used.has(row.element)) rowsOrdered.push(row);
-                  }
-                  const rowsWithSection = rowsOrdered;
-                  if (rowsWithSection.length === 0) {
-                    const t = extractedProjectText?.trim() || "";
-                    if (!t) return "Sube archivos del proyecto para ver aquí el texto extraído.";
-                    return <pre className="whitespace-pre-wrap font-sans">{t}</pre>;
-                  }
-                  return (
-                    <table className="w-full border-collapse border border-gray-300 dark:border-gray-600">
-                      <thead>
-                        <tr className="bg-gray-100 dark:bg-gray-800">
-                          <th className="border border-gray-300 px-3 py-2 text-left font-semibold dark:border-gray-600">Sección</th>
-                          <th className="border border-gray-300 px-3 py-2 text-left font-semibold dark:border-gray-600">Elemento</th>
-                          <th className="border border-gray-300 px-3 py-2 text-left font-semibold dark:border-gray-600">Contenido</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rowsWithSection.map((row, i) => (
-                          <tr key={i} className="border-b border-gray-200 dark:border-gray-700">
-                            <td className="border border-gray-300 px-3 py-2 align-top dark:border-gray-600">{row.section}</td>
-                            <td className="border border-gray-300 px-3 py-2 align-top dark:border-gray-600">{row.element}</td>
-                            <td className="border border-gray-300 px-3 py-2 align-top dark:border-gray-600 whitespace-pre-wrap">{row.content}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  );
-                })()}
+            {extractedProjectLoading ? (
+              "Extrayendo con IA…"
+            ) : (
+              <ProjectExtractedTable
+                rows={
+                  extractedProjectTable.length > 0
+                    ? extractedProjectTable.map((r) => ({
+                        section: r.section ?? "—",
+                        element: r.element,
+                        content: r.content,
+                        incomplete: r.incomplete,
+                      }))
+                    : parseElementoContenido(extractedProjectText?.trim() || "").map(([elem, cont]) => ({
+                        section: "—",
+                        element: elem,
+                        content: cont,
+                      }))
+                }
+                elementsWithSection={elementsWithSection}
+                extractedProjectText={extractedProjectText}
+              />
+            )}
           </div>
         </FullscreenOverlay>
       )}

@@ -17,6 +17,7 @@ import {
 export type ChatAgentInput = {
   evaluationTypeId: number;
   message: string;
+  sessionId?: string;
   projectFilePaths: string[];
   projectElementsTable?: { element: string; content: string }[];
   projectStructuredData?: ProjectStructuredData;
@@ -49,6 +50,8 @@ async function* runToolLoop(
   const ctx: AgentToolContext = {
     evaluationTypeId: input.evaluationTypeId,
     plan,
+    sessionId: input.sessionId ?? "default",
+    projectFilePaths: input.projectFilePaths,
     projectElementsTable: input.projectElementsTable,
     projectStructuredData: input.projectStructuredData,
   };
@@ -159,13 +162,30 @@ export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatS
     message: "Agente planificador (Nivel A): analizando la pregunta…",
   };
 
-  const plan = await routeContextPlan({
+  let plan = await routeContextPlan({
     message: input.message,
     hasProjectData,
     hasRubric,
     hasInstructions,
     hasKnowledge,
   });
+
+  const hasEmptyElements = (input.projectElementsTable ?? []).some((r) => !r.content.trim());
+  const wantsReextract =
+    /re-?extra|vuelve a extra|completar extracción|elemento vacío/i.test(input.message);
+  if (
+    (hasEmptyElements || wantsReextract) &&
+    plan.sources.includes("project") &&
+    (input.projectFilePaths?.length ?? 0) > 0 &&
+    !plan.toolsHint.includes("reextract_project_element")
+  ) {
+    plan = {
+      ...plan,
+      toolsHint: [...plan.toolsHint, "reextract_project_element"],
+      useToolLoop: plan.useToolLoop || wantsReextract,
+      agentLevel: wantsReextract && plan.agentLevel === "A" ? "B" : plan.agentLevel,
+    };
+  }
 
   yield {
     type: "plan",

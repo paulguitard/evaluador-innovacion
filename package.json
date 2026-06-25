@@ -6,7 +6,8 @@
     "dev": "npx next dev",
     "build": "npx next build",
     "start": "npx next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:extract": "npx tsx --test lib/extract-regression.test.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2",

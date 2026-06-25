@@ -10,12 +10,14 @@ import { summarizeChunks } from "@/lib/agent-events";
 import { CONTEXT_LIMITS } from "@/lib/rag-limits";
 import type { ContextPlan } from "@/lib/context-plan";
 import type { ProjectStructuredData } from "@/lib/build-context";
+import { retryExtractElement } from "@/lib/project-extract-pipeline";
 
 export type AgentToolName =
   | "search_knowledge"
   | "get_rubric"
   | "get_config"
-  | "get_project_elements";
+  | "get_project_elements"
+  | "reextract_project_element";
 
 export type AgentArtifacts = {
   knowledgeChunks: RetrievedChunk[];
@@ -37,6 +39,8 @@ export function createEmptyArtifacts(): AgentArtifacts {
 export type AgentToolContext = {
   evaluationTypeId: number;
   plan: ContextPlan;
+  sessionId?: string;
+  projectFilePaths?: string[];
   projectElementsTable?: { element: string; content: string }[];
   projectStructuredData?: ProjectStructuredData;
 };
@@ -97,6 +101,24 @@ export const AGENT_TOOL_DEFINITIONS = [
             description: "Nombre del elemento (opcional). Si se omite, devuelve todos.",
           },
         },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "reextract_project_element",
+      description:
+        "Reintenta extraer un elemento del proyecto cuando está vacío o incompleto (agente de extracción). Solo para casos difíciles.",
+      parameters: {
+        type: "object",
+        properties: {
+          element: {
+            type: "string",
+            description: "Título exacto del elemento a re-extraer",
+          },
+        },
+        required: ["element"],
       },
     },
   },
@@ -219,6 +241,37 @@ export async function executeAgentTool(
       return { summary, ok: rows.length > 0 };
     }
 
+    case "reextract_project_element": {
+      const elementTitle = typeof args.element === "string" ? args.element.trim() : "";
+      const paths = ctx.projectFilePaths ?? [];
+      if (!elementTitle) {
+        return { summary: "Se requiere el nombre del elemento.", ok: false };
+      }
+      if (paths.length === 0) {
+        return { summary: "No hay archivos del proyecto para re-extraer.", ok: false };
+      }
+      const result = await retryExtractElement({
+        sessionId: ctx.sessionId ?? "default",
+        evaluationTypeId: ctx.evaluationTypeId,
+        projectFilePaths: paths,
+        elementTitle,
+      });
+      if (result.content.trim()) {
+        const table = [...(ctx.projectElementsTable ?? [])];
+        const idx = table.findIndex((r) => r.element === result.element);
+        const row = { element: result.element, content: result.content };
+        if (idx >= 0) table[idx] = row;
+        else table.push(row);
+        artifacts.projectElements = table;
+        ctx.projectElementsTable = table;
+      }
+      const summary = result.content.trim()
+        ? `Re-extraído "${result.element}" (${result.content.length} caracteres).`
+        : `No se encontró contenido para "${elementTitle}".`;
+      artifacts.toolLog.push({ tool, summary });
+      return { summary, ok: !!result.content.trim() };
+    }
+
     default:
       return { summary: `Herramienta desconocida: ${name}`, ok: false };
   }
@@ -239,6 +292,12 @@ export async function runPlannedTools(
     }
     if (hint === "get_project_elements" && ctx.plan.sources.includes("project")) {
       await executeAgentTool("get_project_elements", {}, ctx, artifacts);
+    }
+    if (hint === "reextract_project_element") {
+      const empty = (ctx.projectElementsTable ?? []).find((r) => !r.content.trim());
+      if (empty) {
+        await executeAgentTool("reextract_project_element", { element: empty.element }, ctx, artifacts);
+      }
     }
     if (hint === "get_config") {
       await executeAgentTool("get_config", { section: "summary" }, ctx, artifacts);

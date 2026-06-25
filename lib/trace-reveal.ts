@@ -22,6 +22,13 @@ export function createStaggeredTraceReveal(
   let targetContent = "";
   let visibleCount = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  const fullyRevealedListeners: Array<() => void> = [];
+
+  function notifyFullyRevealedIfIdle() {
+    if (visibleCount < targetTrace.length || timer != null) return;
+    const listeners = fullyRevealedListeners.splice(0);
+    for (const fn of listeners) fn();
+  }
 
   function buildVisibleTrace(): AgentTraceEntry[] {
     return targetTrace.slice(0, visibleCount).map((entry, i) => {
@@ -38,6 +45,7 @@ export function createStaggeredTraceReveal(
       content: revealing ? "" : targetContent,
       revealing,
     });
+    if (!revealing) notifyFullyRevealedIfIdle();
   }
 
   function scheduleNext() {
@@ -102,7 +110,17 @@ export function createStaggeredTraceReveal(
     },
 
     destroy() {
+      fullyRevealedListeners.length = 0;
       this.reset();
+    },
+
+    /** Ejecuta el callback cuando la traza visible alcanzó el total y no hay timers pendientes. */
+    onFullyRevealed(cb: () => void) {
+      if (visibleCount >= targetTrace.length && timer == null) {
+        cb();
+      } else {
+        fullyRevealedListeners.push(cb);
+      }
     },
   };
 }

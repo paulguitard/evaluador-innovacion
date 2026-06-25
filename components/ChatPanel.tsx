@@ -64,7 +64,6 @@ export default function ChatPanel({
   projectElementsTable,
   projectStructuredData,
   sessionId,
-  extractionLoading = false,
 }: {
   messages: ChatMessage[];
   onMessagesChange: (updater: (prev: ChatMessage[]) => ChatMessage[]) => void;
@@ -76,7 +75,6 @@ export default function ChatPanel({
   projectElementsTable: { element: string; content: string }[];
   projectStructuredData?: ProjectStructuredData;
   sessionId: string;
-  extractionLoading?: boolean;
 }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -122,6 +120,7 @@ export default function ChatPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           evaluationTypeId: activeTypeId,
+          sessionId,
           message: text,
           projectFilePaths,
           projectElementsTable: projectElementsTable?.length ? projectElementsTable : undefined,
@@ -369,36 +368,34 @@ export default function ChatPanel({
                   />
                 </div>
               ) : null}
-              <div className="mt-1 flex items-center gap-2 whitespace-pre-wrap break-words text-sm">
-                {m.role === "assistant" &&
-                !m.content &&
-                (loading || m.traceRevealing) &&
-                i === messages.length - 1 ? (
-                  <>
-                    <LoadingSpinner />
-                    <span className="text-gray-500 dark:text-gray-400">
-                      {m.traceRevealing
-                        ? "Analizando…"
-                        : m.trace?.length
-                          ? "Generando respuesta…"
-                          : "Respondiendo…"}
-                    </span>
-                  </>
-                ) : (
-                  m.content || (m.role === "assistant" ? "…" : "")
-                )}
-              </div>
+              {(m.content ||
+                (m.role === "assistant" &&
+                  !m.content &&
+                  (loading || m.traceRevealing) &&
+                  i === messages.length - 1)) && (
+                <div className="mt-1 flex items-center gap-2 whitespace-pre-wrap break-words text-sm">
+                  {m.role === "assistant" &&
+                  !m.content &&
+                  (loading || m.traceRevealing) &&
+                  i === messages.length - 1 ? (
+                    <>
+                      <LoadingSpinner />
+                      <span className="text-gray-500 dark:text-gray-400">
+                        {m.traceRevealing
+                          ? "Analizando…"
+                          : m.trace?.length
+                            ? "Generando respuesta…"
+                            : "Respondiendo…"}
+                      </span>
+                    </>
+                  ) : (
+                    m.content
+                  )}
+                </div>
+              )}
             </div>
           </div>
         ))}
-        {extractionLoading && (
-          <div className="mb-3 flex justify-start">
-            <div className="flex max-w-[85%] items-center gap-2 rounded-lg bg-gray-100 px-3 py-2 dark:bg-gray-800">
-              <LoadingSpinner />
-              <span className="text-sm text-gray-600 dark:text-gray-300">Trabajando en la extracción…</span>
-            </div>
-          </div>
-        )}
       </div>
       {projectFilePaths.length > 0 && (
         <div className="shrink-0 border-t border-gray-200 px-4 py-1.5 dark:border-gray-700">
