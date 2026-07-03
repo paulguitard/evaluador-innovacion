@@ -206,9 +206,16 @@ export default function ConfigPanel({
     try {
       const capsRes = await fetch("/api/upload/capabilities");
       const caps = await capsRes.json().catch(() => ({}));
-      const useClientBlob =
-        caps.blobStorage === true &&
-        Array.from(files).some((f) => f.size >= (caps.maxServerUploadBytes ?? MAX_VERCEL_SERVER_UPLOAD_BYTES));
+      const needsClientBlob = Array.from(files).some(
+        (f) => f.size >= (caps.maxServerUploadBytes ?? MAX_VERCEL_SERVER_UPLOAD_BYTES)
+      );
+      const useClientBlob = caps.blobStorage === true && needsClientBlob;
+
+      if (useClientBlob && caps.clientBlobUpload !== true) {
+        throw new Error(
+          "El archivo supera 4,5 MB y requiere subida directa a Vercel Blob, pero falta BLOB_READ_WRITE_TOKEN en el proyecto. En Vercel: Storage → Blob store → Connect to Project (o Settings → Environment Variables), luego redeploy."
+        );
+      }
 
       if (useClientBlob) {
         const uploaded: { name: string; url: string }[] = [];

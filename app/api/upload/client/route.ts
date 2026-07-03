@@ -1,7 +1,7 @@
 import path from "path";
 import { NextResponse } from "next/server";
 import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
-import { useBlobStorage } from "@/lib/blob-storage";
+import { canClientBlobUpload, useBlobStorage } from "@/lib/blob-storage";
 import { getEvaluationTypeById } from "@/lib/db";
 import { getSupportedExtensions } from "@/lib/document-parser";
 
@@ -27,6 +27,15 @@ type ClientPayload = { kind?: string; evaluationTypeId?: number };
 export async function POST(request: Request): Promise<NextResponse> {
   if (!useBlobStorage()) {
     return NextResponse.json({ error: "Blob storage no configurado" }, { status: 400 });
+  }
+  if (!canClientBlobUpload()) {
+    return NextResponse.json(
+      {
+        error:
+          "Falta BLOB_READ_WRITE_TOKEN. En Vercel: Storage → tu Blob store → Connect to Project, o añade la variable en Settings → Environment Variables y redeploy.",
+      },
+      { status: 503 }
+    );
   }
 
   const body = (await request.json()) as HandleUploadBody;

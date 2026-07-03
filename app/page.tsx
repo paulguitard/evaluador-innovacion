@@ -142,9 +142,13 @@ export default function Home() {
         if (Array.isArray(data)) {
           setEvaluationTypes(data);
           if (data.length > 0 && !activeTypeId) setActiveTypeId(data[0].id);
+        } else if (data?.error) {
+          console.error("Error cargando tipos de evaluación:", data.error);
         }
       })
-      .catch(() => {});
+      .catch((err) => {
+        console.error("Error cargando tipos de evaluación:", err);
+      });
   }, [configOpen]);
 
   useEffect(() => {

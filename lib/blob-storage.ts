@@ -8,6 +8,11 @@ export function useBlobStorage(): boolean {
   );
 }
 
+/** Client uploads (archivos >4,5 MB) requieren BLOB_READ_WRITE_TOKEN; BLOB_STORE_ID solo no basta. */
+export function canClientBlobUpload(): boolean {
+  return !!process.env.BLOB_READ_WRITE_TOKEN?.trim();
+}
+
 export function knowledgeBlobPrefix(evaluationTypeId: number): string {
   return `knowledge/${evaluationTypeId}`;
 }

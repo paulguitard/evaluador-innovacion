@@ -12,6 +12,7 @@ import fs from "fs";
 import path from "path";
 import { DatabaseSync } from "node:sqlite";
 import { initDbPostgres } from "../lib/db-postgres";
+import { normalizeDatabaseUrl } from "../lib/database-url";
 import postgres from "postgres";
 
 const dbPath = path.join(process.cwd(), "data", "evaluador.db");
@@ -54,11 +55,12 @@ type SqliteConfig = {
 
 async function main() {
   loadEnvLocal();
-  const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
-  if (!url) {
+  const raw = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  if (!raw) {
     console.error("DATABASE_URL o POSTGRES_URL es obligatorio.");
     process.exit(1);
   }
+  const url = normalizeDatabaseUrl(raw);
 
   const sqlite = loadSqlite();
   const sql = postgres(url, { ssl: "require", prepare: false, max: 1 });

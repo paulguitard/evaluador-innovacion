@@ -18,6 +18,8 @@
 
 Connection string: **Project Settings → Database → URI → Transaction** (puerto 6543).
 
+Si la contraseña contiene `&`, codifícala como `%26` en la URL (ej. `&WC&…` → `%26WC%26…`). La app también intenta corregirlo automáticamente al conectar.
+
 ## Variables en Vercel
 
 | Variable | Obligatoria |

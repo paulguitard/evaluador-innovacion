@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { useBlobStorage } from "@/lib/blob-storage";
+import { canClientBlobUpload, useBlobStorage } from "@/lib/blob-storage";
 import { MAX_VERCEL_SERVER_UPLOAD_BYTES } from "@/lib/upload-limits";
 
 export async function GET() {
   return NextResponse.json({
     blobStorage: useBlobStorage(),
+    clientBlobUpload: canClientBlobUpload(),
     maxServerUploadBytes: MAX_VERCEL_SERVER_UPLOAD_BYTES,
   });
 }
