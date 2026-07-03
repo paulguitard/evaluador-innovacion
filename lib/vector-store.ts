@@ -78,10 +78,11 @@ export async function saveChunks(
   chunks: StoredChunk[],
   meta?: KnowledgeIndexMeta
 ): Promise<void> {
-  saveChunksToStore(storeConfig(evaluationTypeId), chunks, meta);
   if (useBlobStorage()) {
     await saveKnowledgeChunksToBlob(evaluationTypeId, chunks, meta);
+    return;
   }
+  saveChunksToStore(storeConfig(evaluationTypeId), chunks, meta);
 }
 
 export async function hasChunksAsync(evaluationTypeId: number): Promise<boolean> {

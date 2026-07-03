@@ -103,9 +103,16 @@ export function getKnowledgeFilePath(evaluationTypeId: number, filename: string)
 }
 
 export function getVectorsDir(evaluationTypeId: number): string {
-  const dir = path.join(getDataDir(), String(evaluationTypeId), "vectors");
+  const base = useEphemeralSessions()
+    ? path.join(os.tmpdir(), "evaluador-vectors")
+    : getDataDir();
+  const dir = path.join(base, String(evaluationTypeId), "vectors");
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      /* read-only FS en serverless: la ruta sirve solo para comprobar si hay caché local */
+    }
   }
   return dir;
 }
