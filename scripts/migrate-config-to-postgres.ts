@@ -11,9 +11,26 @@
 import fs from "fs";
 import path from "path";
 import { DatabaseSync } from "node:sqlite";
+import { initDbPostgres } from "../lib/db-postgres";
 import postgres from "postgres";
 
 const dbPath = path.join(process.cwd(), "data", "evaluador.db");
+
+/** Carga .env.local si DATABASE_URL no está en el entorno (p. ej. Windows / PowerShell). */
+function loadEnvLocal() {
+  if (process.env.DATABASE_URL || process.env.POSTGRES_URL) return;
+  const envPath = path.join(process.cwd(), ".env.local");
+  if (!fs.existsSync(envPath)) return;
+  for (const line of fs.readFileSync(envPath, "utf8").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim();
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
 
 function loadSqlite() {
   if (!fs.existsSync(dbPath)) {
@@ -36,6 +53,7 @@ type SqliteConfig = {
 };
 
 async function main() {
+  loadEnvLocal();
   const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
   if (!url) {
     console.error("DATABASE_URL o POSTGRES_URL es obligatorio.");
@@ -44,6 +62,17 @@ async function main() {
 
   const sqlite = loadSqlite();
   const sql = postgres(url, { ssl: "require", prepare: false, max: 1 });
+
+  await initDbPostgres();
+
+  const existing = await sql`SELECT COUNT(*)::int AS n FROM evaluation_types`;
+  const existingCount = Number(existing[0]?.n ?? 0);
+  if (existingCount > 0) {
+    console.warn(
+      `Aviso: Supabase ya tiene ${existingCount} tipo(s). La migración AÑADIRÁ los de SQLite (no reemplaza).`
+    );
+    console.warn("Si creaste tipos de prueba en Vercel, bórralos en Supabase Table Editor antes de migrar.\n");
+  }
 
   const types = sqlite
     .prepare("SELECT id, name FROM evaluation_types ORDER BY id")

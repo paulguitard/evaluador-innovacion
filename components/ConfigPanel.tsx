@@ -1,8 +1,11 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { upload } from "@vercel/blob/client";
 import { ExpandIcon } from "@/components/FullscreenOverlay";
 import LlmConfigModal from "@/components/LlmConfigModal";
+import { sanitizeFilename } from "@/lib/sanitize-filename";
+import { MAX_VERCEL_SERVER_UPLOAD_BYTES } from "@/lib/upload-limits";
 
 type EvaluationType = { id: number; name: string };
 type KnowledgeItem = string | { name: string; url: string };
@@ -200,11 +203,54 @@ export default function ConfigPanel({
     if (!files?.length || !selectedTypeId) return;
     setIndexingKnowledge(true);
     setKnowledgeIndexStatus("Subiendo e indexando documento…");
-    const form = new FormData();
-    form.set("kind", "knowledge");
-    form.set("evaluationTypeId", String(selectedTypeId));
-    for (let i = 0; i < files.length; i++) form.append("files", files[i]);
     try {
+      const capsRes = await fetch("/api/upload/capabilities");
+      const caps = await capsRes.json().catch(() => ({}));
+      const useClientBlob =
+        caps.blobStorage === true &&
+        Array.from(files).some((f) => f.size >= (caps.maxServerUploadBytes ?? MAX_VERCEL_SERVER_UPLOAD_BYTES));
+
+      if (useClientBlob) {
+        const uploaded: { name: string; url: string }[] = [];
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          if (!file?.name) continue;
+          const filename = sanitizeFilename(file.name);
+          const pathname = `knowledge/${selectedTypeId}/${filename}`;
+          const blob = await upload(pathname, file, {
+            access: "public",
+            handleUploadUrl: "/api/upload/client",
+            clientPayload: JSON.stringify({
+              kind: "knowledge",
+              evaluationTypeId: selectedTypeId,
+            }),
+            multipart: file.size > 5 * 1024 * 1024,
+          });
+          uploaded.push({ name: filename, url: blob.url });
+        }
+        if (uploaded.length === 0) {
+          throw new Error("Ningún archivo válido para subir");
+        }
+        const res = await fetch("/api/upload/knowledge-register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ evaluationTypeId: selectedTypeId, uploaded }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data?.error || "Error al registrar documentos");
+        }
+        setConfig((c) => ({ ...c, knowledge_paths: data.knowledge_paths ?? c.knowledge_paths }));
+        onTypesChange();
+        setKnowledgeIndexStatus(formatIndexStatus(data.chunkCount, data.indexError));
+        if (selectedTypeId) refreshRagStatus(selectedTypeId);
+        return;
+      }
+
+      const form = new FormData();
+      form.set("kind", "knowledge");
+      form.set("evaluationTypeId", String(selectedTypeId));
+      for (let i = 0; i < files.length; i++) form.append("files", files[i]);
       const res = await fetch("/api/upload", { method: "POST", body: form });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {

@@ -9,6 +9,12 @@
     "app/api/upload/route.ts": {
       "maxDuration": 300
     },
+    "app/api/upload/client/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/upload/knowledge-register/route.ts": {
+      "maxDuration": 300
+    },
     "app/api/config/[id]/route.ts": {
       "maxDuration": 300
     },

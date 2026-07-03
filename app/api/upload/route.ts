@@ -13,18 +13,18 @@ import { indexKnowledge } from "@/lib/rag-index";
 import { ingestProjectFiles } from "@/lib/project-ingest";
 import { saveProjectBuffersToSession } from "@/lib/session-project-files";
 import { useBlobStorage } from "@/lib/blob-storage";
+import { sanitizeFilename } from "@/lib/sanitize-filename";
+import {
+  registerKnowledgeUploads,
+  type KnowledgeEntry,
+} from "@/lib/knowledge-upload";
+import { MAX_VERCEL_SERVER_UPLOAD_BYTES } from "@/lib/upload-limits";
 
 export const maxDuration = 300;
-
-export type KnowledgeEntry = { name: string; url: string };
 
 type UploadKind = "knowledge" | "rubric" | "project";
 
 const ALLOWED_EXT = new Set(getSupportedExtensions());
-
-function sanitizeFilename(name: string): string {
-  return path.basename(name).replace(/[^a-zA-Z0-9._-]/g, "_");
-}
 
 export async function POST(request: Request) {
   try {
@@ -49,38 +49,21 @@ export async function POST(request: Request) {
           if (!file?.name) continue;
           const ext = path.extname(file.name).toLowerCase();
           if (!ALLOWED_EXT.has(ext)) continue;
+          if (file.size >= MAX_VERCEL_SERVER_UPLOAD_BYTES) {
+            return NextResponse.json(
+              {
+                error: `El archivo "${file.name}" supera 4,5 MB. En Vercel la subida debe ir directo a Blob (actualiza la app).`,
+              },
+              { status: 413 }
+            );
+          }
           const filename = sanitizeFilename(file.name);
           const pathname = `knowledge/${typeId}/${filename}`;
           const blob = await blobPut(pathname, file, { access: "public", addRandomSuffix: true });
           uploaded.push({ name: filename, url: blob.url });
         }
-        const config = await getConfig(typeId);
-        const current = (() => {
-          try {
-            const raw = JSON.parse(config?.knowledge_paths || "[]");
-            return Array.isArray(raw) ? raw : [];
-          } catch {
-            return [];
-          }
-        })();
-        const newEntries: KnowledgeEntry[] = [...current.filter((e): e is KnowledgeEntry => typeof e === "object" && e?.name != null && e?.url != null), ...uploaded];
-        await updateConfig(typeId, { knowledge_paths: newEntries });
-        let chunkCount: number | undefined;
-        let indexError: string | undefined;
-        try {
-          const result = await indexKnowledge(typeId, {
-            reindexDocNames: uploaded.map((u) => u.name),
-          });
-          chunkCount = result.chunkCount;
-        } catch (e) {
-          indexError = e instanceof Error ? e.message : String(e);
-        }
-        return NextResponse.json({
-          saved: uploaded.map((u) => u.name),
-          knowledge_paths: newEntries,
-          chunkCount,
-          indexError,
-        });
+        const result = await registerKnowledgeUploads(typeId, uploaded);
+        return NextResponse.json(result);
       }
 
       const dir = getKnowledgeDir(typeId);
