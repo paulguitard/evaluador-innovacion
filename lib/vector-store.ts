@@ -46,13 +46,13 @@ function loadChunksFromDisk(evaluationTypeId: number): StoredChunk[] {
   return loadChunksFromStore(storeConfig(evaluationTypeId));
 }
 
-/** Carga chunks: disco local y, si aplica, fallback a Vercel Blob. */
+/** Carga chunks: en Blob primero; en local, disco y luego Blob. */
 export async function loadChunksAsync(evaluationTypeId: number): Promise<StoredChunk[]> {
-  const disk = loadChunksFromDisk(evaluationTypeId);
-  if (disk.length > 0) return disk;
-  if (!useBlobStorage()) return [];
-  const fromBlob = await loadKnowledgeChunksFromBlob(evaluationTypeId);
-  return fromBlob ?? [];
+  if (useBlobStorage()) {
+    const fromBlob = await loadKnowledgeChunksFromBlob(evaluationTypeId);
+    if (fromBlob && fromBlob.length > 0) return fromBlob;
+  }
+  return loadChunksFromDisk(evaluationTypeId);
 }
 
 /** @deprecated Prefer loadChunksAsync en serverless. */
@@ -63,10 +63,11 @@ export function loadChunks(evaluationTypeId: number): StoredChunk[] {
 export async function loadChunksMetaAsync(
   evaluationTypeId: number
 ): Promise<KnowledgeIndexMeta | null> {
-  const disk = loadMetaFromStore<KnowledgeIndexMeta>(storeConfig(evaluationTypeId));
-  if (disk) return disk;
-  if (!useBlobStorage()) return null;
-  return loadKnowledgeMetaFromBlob(evaluationTypeId);
+  if (useBlobStorage()) {
+    const fromBlob = await loadKnowledgeMetaFromBlob(evaluationTypeId);
+    if (fromBlob) return fromBlob;
+  }
+  return loadMetaFromStore<KnowledgeIndexMeta>(storeConfig(evaluationTypeId));
 }
 
 export function loadChunksMeta(evaluationTypeId: number): KnowledgeIndexMeta | null {

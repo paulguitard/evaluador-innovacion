@@ -14,16 +14,30 @@ export function useEphemeralSessions(): boolean {
 }
 
 export function getDataDir(): string {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  const base = useEphemeralSessions()
+    ? path.join(os.tmpdir(), "evaluador-data")
+    : DATA_DIR;
+  if (!fs.existsSync(base)) {
+    try {
+      fs.mkdirSync(base, { recursive: true });
+    } catch {
+      /* read-only FS en serverless */
+    }
   }
-  return DATA_DIR;
+  return base;
 }
 
 export function getKnowledgeDir(evaluationTypeId: number): string {
-  const dir = path.join(getDataDir(), String(evaluationTypeId), "knowledge");
+  const base = useEphemeralSessions()
+    ? path.join(os.tmpdir(), "evaluador-data")
+    : getDataDir();
+  const dir = path.join(base, String(evaluationTypeId), "knowledge");
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      /* read-only FS */
+    }
   }
   return dir;
 }

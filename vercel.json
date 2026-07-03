@@ -15,6 +15,12 @@
     "app/api/upload/knowledge-register/route.ts": {
       "maxDuration": 300
     },
+    "app/api/upload/knowledge-link/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/upload/blob-list/route.ts": {
+      "maxDuration": 60
+    },
     "app/api/config/[id]/route.ts": {
       "maxDuration": 300
     },

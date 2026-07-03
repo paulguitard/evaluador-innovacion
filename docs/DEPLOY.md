@@ -26,6 +26,7 @@ Si la contraseña contiene `&`, codifícala como `%26` en la URL (ej. `&WC&…` 
 |----------|-------------|
 | `DATABASE_URL` | Sí |
 | `BLOB_STORE_ID` o `BLOB_READ_WRITE_TOKEN` | Sí (auto al conectar Blob) |
+| `BLOB_WEBHOOK_PUBLIC_KEY` | Sí si no hay `BLOB_READ_WRITE_TOKEN` (subida >4,5 MB) |
 | `OPENROUTER_API_KEY` | Sí |
 | `NEXT_PUBLIC_APP_URL` | Recomendada |
 

@@ -1,28 +1,54 @@
-import path from "path";
 import { NextResponse } from "next/server";
-import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
-import { canClientBlobUpload, useBlobStorage } from "@/lib/blob-storage";
-import { getEvaluationTypeById } from "@/lib/db";
-import { getSupportedExtensions } from "@/lib/document-parser";
+import {
+  handleUpload,
+  handleUploadPresigned,
+  type HandleUploadBody,
+  type HandleUploadPresignedBody,
+} from "@vercel/blob/client";
+import { issueSignedToken } from "@vercel/blob";
+import {
+  canClientBlobUpload,
+  canLegacyClientBlobUpload,
+  canPresignedBlobUpload,
+  useBlobStorage,
+} from "@/lib/blob-storage";
+import {
+  KNOWLEDGE_CONTENT_TYPES,
+  validateKnowledgeUploadPath,
+} from "@/lib/upload-client-auth";
 
 export const maxDuration = 60;
 
-const ALLOWED_EXT = new Set(getSupportedExtensions());
-const KNOWLEDGE_CONTENT_TYPES = [
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-powerpoint",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "text/plain",
-  "text/markdown",
-  "application/json",
-  "application/octet-stream",
-];
+const UPLOAD_TOKEN_OPTS = {
+  allowedContentTypes: KNOWLEDGE_CONTENT_TYPES,
+  maximumSizeInBytes: 50 * 1024 * 1024,
+  addRandomSuffix: true,
+} as const;
 
-type ClientPayload = { kind?: string; evaluationTypeId?: number };
+async function onBeforeGenerateToken(pathname: string, clientPayload: string | null) {
+  await validateKnowledgeUploadPath(pathname, clientPayload);
+  return {
+    ...UPLOAD_TOKEN_OPTS,
+    tokenPayload: clientPayload,
+  };
+}
+
+async function getSignedToken(pathname: string, clientPayload: string | null) {
+  await validateKnowledgeUploadPath(pathname, clientPayload);
+  const token = await issueSignedToken({
+    pathname,
+    operations: ["put"],
+    allowedContentTypes: KNOWLEDGE_CONTENT_TYPES,
+    maximumSizeInBytes: 50 * 1024 * 1024,
+  });
+  return {
+    token,
+    urlOptions: {
+      ...UPLOAD_TOKEN_OPTS,
+      tokenPayload: clientPayload,
+    },
+  };
+}
 
 export async function POST(request: Request): Promise<NextResponse> {
   if (!useBlobStorage()) {
@@ -32,53 +58,45 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json(
       {
         error:
-          "Falta BLOB_READ_WRITE_TOKEN. En Vercel: Storage → tu Blob store → Connect to Project, o añade la variable en Settings → Environment Variables y redeploy.",
+          "Falta configuración Blob. Conecta el store al proyecto (BLOB_STORE_ID + BLOB_WEBHOOK_PUBLIC_KEY) o añade BLOB_READ_WRITE_TOKEN.",
       },
       { status: 503 }
     );
   }
 
-  const body = (await request.json()) as HandleUploadBody;
+  const body = (await request.json()) as HandleUploadBody | HandleUploadPresignedBody;
 
   try {
+    if (body.type === "blob.generate-presigned-url") {
+      if (!canPresignedBlobUpload()) {
+        return NextResponse.json(
+          { error: "Falta BLOB_WEBHOOK_PUBLIC_KEY para subida presigned." },
+          { status: 503 }
+        );
+      }
+      const jsonResponse = await handleUploadPresigned({
+        body,
+        request,
+        getSignedToken,
+      });
+      return NextResponse.json(jsonResponse);
+    }
+
+    if (!canLegacyClientBlobUpload()) {
+      return NextResponse.json(
+        {
+          error:
+            "Subida legacy no disponible. Usa uploadPresigned (requiere BLOB_WEBHOOK_PUBLIC_KEY).",
+        },
+        { status: 503 }
+      );
+    }
+
     const jsonResponse = await handleUpload({
-      body,
+      body: body as HandleUploadBody,
       request,
-      onBeforeGenerateToken: async (pathname, clientPayload) => {
-        let payload: ClientPayload = {};
-        try {
-          payload = JSON.parse(clientPayload ?? "{}") as ClientPayload;
-        } catch {
-          throw new Error("Payload de subida inválido");
-        }
-
-        if (payload.kind !== "knowledge" || !Number.isInteger(payload.evaluationTypeId)) {
-          throw new Error("evaluationTypeId requerido para subir knowledge");
-        }
-
-        const typeId = payload.evaluationTypeId!;
-        const type = await getEvaluationTypeById(typeId);
-        if (!type) throw new Error("Tipo de evaluación no encontrado");
-
-        const expectedPrefix = `knowledge/${typeId}/`;
-        if (!pathname.startsWith(expectedPrefix)) {
-          throw new Error("Ruta de subida inválida");
-        }
-
-        const ext = path.extname(pathname).toLowerCase();
-        if (!ALLOWED_EXT.has(ext)) {
-          throw new Error("Tipo de archivo no permitido");
-        }
-
-        return {
-          allowedContentTypes: KNOWLEDGE_CONTENT_TYPES,
-          maximumSizeInBytes: 50 * 1024 * 1024,
-          addRandomSuffix: true,
-          tokenPayload: clientPayload,
-        };
-      },
+      onBeforeGenerateToken: onBeforeGenerateToken,
     });
-
     return NextResponse.json(jsonResponse);
   } catch (error) {
     return NextResponse.json(

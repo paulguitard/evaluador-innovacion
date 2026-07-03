@@ -8,9 +8,22 @@ export function useBlobStorage(): boolean {
   );
 }
 
-/** Client uploads (archivos >4,5 MB) requieren BLOB_READ_WRITE_TOKEN; BLOB_STORE_ID solo no basta. */
-export function canClientBlobUpload(): boolean {
+/** Subida directa desde el navegador con token clásico (BLOB_READ_WRITE_TOKEN). */
+export function canLegacyClientBlobUpload(): boolean {
   return !!process.env.BLOB_READ_WRITE_TOKEN?.trim();
+}
+
+/** Subida directa con OIDC + presigned (BLOB_STORE_ID + BLOB_WEBHOOK_PUBLIC_KEY). */
+export function canPresignedBlobUpload(): boolean {
+  return !!(
+    process.env.BLOB_STORE_ID?.trim() &&
+    process.env.BLOB_WEBHOOK_PUBLIC_KEY?.trim()
+  );
+}
+
+/** Cualquier subida cliente (>4,5 MB) disponible. */
+export function canClientBlobUpload(): boolean {
+  return canLegacyClientBlobUpload() || canPresignedBlobUpload();
 }
 
 export function knowledgeBlobPrefix(evaluationTypeId: number): string {

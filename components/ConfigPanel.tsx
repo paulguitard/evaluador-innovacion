@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { upload } from "@vercel/blob/client";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { upload, uploadPresigned } from "@vercel/blob/client";
 import { ExpandIcon } from "@/components/FullscreenOverlay";
 import LlmConfigModal from "@/components/LlmConfigModal";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
@@ -60,6 +60,12 @@ export default function ConfigPanel({
     chunksFileBytes: number;
     knowledgeConfigured: boolean;
   } | null>(null);
+  const [blobCatalog, setBlobCatalog] = useState<
+    { name: string; pathname: string; url: string; size: number; uploadedAt: string }[]
+  >([]);
+  const [blobCatalogLoading, setBlobCatalogLoading] = useState(false);
+  const [selectedBlobUrls, setSelectedBlobUrls] = useState<Set<string>>(new Set());
+  const [blobStorageEnabled, setBlobStorageEnabled] = useState(false);
 
   const refreshRagStatus = (typeId: number) => {
     fetch(`/api/config/${typeId}/rag-status`)
@@ -77,6 +83,31 @@ export default function ConfigPanel({
       })
       .catch(() => setRagStatus(null));
   };
+
+  const loadBlobCatalog = useCallback(() => {
+    setBlobCatalogLoading(true);
+    fetch("/api/upload/blob-list")
+      .then((r) => r.json())
+      .then((data) => {
+        setBlobStorageEnabled(!!data.blobStorage);
+        setBlobCatalog(Array.isArray(data.blobs) ? data.blobs : []);
+      })
+      .catch(() => {
+        setBlobCatalog([]);
+        setBlobStorageEnabled(false);
+      })
+      .finally(() => setBlobCatalogLoading(false));
+  }, []);
+
+  const linkedKnowledgeUrls = useCallback(
+    () =>
+      new Set(
+        config.knowledge_paths
+          .map((p) => (typeof p === "object" && p?.url ? p.url : null))
+          .filter((u): u is string => !!u)
+      ),
+    [config.knowledge_paths]
+  );
   const [showElementModal, setShowElementModal] = useState(false);
   const [editingElementIndex, setEditingElementIndex] = useState<number | null>(null);
   const [elementForm, setElementForm] = useState({ title: "", description: "", section: "General" });
@@ -136,7 +167,8 @@ export default function ConfigPanel({
       .catch(() => setConfig(defaultConfig))
       .finally(() => setLoading(false));
     refreshRagStatus(selectedTypeId);
-  }, [selectedTypeId]);
+    loadBlobCatalog();
+  }, [selectedTypeId, loadBlobCatalog]);
 
   const handleCreateType = async () => {
     const name = newTypeName.trim();
@@ -209,30 +241,37 @@ export default function ConfigPanel({
       const needsClientBlob = Array.from(files).some(
         (f) => f.size >= (caps.maxServerUploadBytes ?? MAX_VERCEL_SERVER_UPLOAD_BYTES)
       );
-      const useClientBlob = caps.blobStorage === true && needsClientBlob;
+      const useClientBlob =
+        caps.blobStorage === true &&
+        needsClientBlob &&
+        (caps.clientBlobUpload === true || caps.presignedClientUpload === true);
 
-      if (useClientBlob && caps.clientBlobUpload !== true) {
+      if (needsClientBlob && caps.blobStorage && !useClientBlob) {
         throw new Error(
-          "El archivo supera 4,5 MB y requiere subida directa a Vercel Blob, pero falta BLOB_READ_WRITE_TOKEN en el proyecto. En Vercel: Storage → Blob store → Connect to Project (o Settings → Environment Variables), luego redeploy."
+          "El archivo supera 4,5 MB. Conecta Vercel Blob al proyecto (BLOB_STORE_ID + BLOB_WEBHOOK_PUBLIC_KEY) y redeploy."
         );
       }
 
       if (useClientBlob) {
+        const usePresigned = caps.presignedClientUpload === true;
         const uploaded: { name: string; url: string }[] = [];
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
           if (!file?.name) continue;
           const filename = sanitizeFilename(file.name);
           const pathname = `knowledge/${selectedTypeId}/${filename}`;
-          const blob = await upload(pathname, file, {
-            access: "public",
+          const uploadOpts = {
+            access: "public" as const,
             handleUploadUrl: "/api/upload/client",
             clientPayload: JSON.stringify({
               kind: "knowledge",
               evaluationTypeId: selectedTypeId,
             }),
             multipart: file.size > 5 * 1024 * 1024,
-          });
+          };
+          const blob = usePresigned
+            ? await uploadPresigned(pathname, file, uploadOpts)
+            : await upload(pathname, file, uploadOpts);
           uploaded.push({ name: filename, url: blob.url });
         }
         if (uploaded.length === 0) {
@@ -293,6 +332,34 @@ export default function ConfigPanel({
       if (!res.ok) throw new Error(data?.error || "Error al eliminar");
       setConfig((c) => ({ ...c, knowledge_paths: newPaths }));
       setKnowledgeIndexStatus(formatIndexStatus(data.chunkCount, data.indexError) ?? "Documento eliminado.");
+      refreshRagStatus(selectedTypeId);
+    } catch (err) {
+      setKnowledgeIndexStatus(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIndexingKnowledge(false);
+    }
+  };
+
+  const handleLinkBlobDocuments = async () => {
+    if (!selectedTypeId || selectedBlobUrls.size === 0) return;
+    const blobs = blobCatalog
+      .filter((b) => selectedBlobUrls.has(b.url))
+      .map((b) => ({ name: b.name, url: b.url }));
+    if (blobs.length === 0) return;
+    setIndexingKnowledge(true);
+    setKnowledgeIndexStatus("Vinculando documentos del almacenamiento…");
+    try {
+      const res = await fetch("/api/upload/knowledge-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ evaluationTypeId: selectedTypeId, blobs }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || "Error al vincular documentos");
+      setConfig((c) => ({ ...c, knowledge_paths: data.knowledge_paths ?? c.knowledge_paths }));
+      onTypesChange();
+      setSelectedBlobUrls(new Set());
+      setKnowledgeIndexStatus(formatIndexStatus(data.chunkCount, data.indexError));
       refreshRagStatus(selectedTypeId);
     } catch (err) {
       setKnowledgeIndexStatus(err instanceof Error ? err.message : String(err));
@@ -619,6 +686,70 @@ export default function ConfigPanel({
                 <p className={`mt-1 shrink-0 text-xs ${knowledgeIndexStatus.startsWith("Error") || knowledgeIndexStatus.includes("Error al indexar") ? "text-red-600 dark:text-red-400" : "text-emerald-700 dark:text-emerald-400"}`}>
                   {knowledgeIndexStatus}
                 </p>
+              )}
+              {blobStorageEnabled && (
+                <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50/80 p-2 dark:border-gray-600 dark:bg-gray-900/40">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-gray-600 dark:text-gray-400">
+                      Documentos en Vercel Blob
+                    </span>
+                    <button
+                      type="button"
+                      onClick={loadBlobCatalog}
+                      disabled={blobCatalogLoading}
+                      className="text-xs text-gray-500 underline hover:text-gray-700 dark:hover:text-gray-300"
+                    >
+                      {blobCatalogLoading ? "Cargando…" : "Actualizar"}
+                    </button>
+                  </div>
+                  {blobCatalog.length === 0 ? (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      {blobCatalogLoading ? "Buscando archivos…" : "No hay documentos en el almacenamiento."}
+                    </p>
+                  ) : (
+                    <ul className="max-h-36 space-y-1 overflow-y-auto text-xs">
+                      {blobCatalog.map((b) => {
+                        const linked = linkedKnowledgeUrls().has(b.url);
+                        const checked = selectedBlobUrls.has(b.url);
+                        return (
+                          <li key={b.url} className="flex items-start gap-2 rounded px-1 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800">
+                            <input
+                              type="checkbox"
+                              className="mt-0.5"
+                              disabled={linked || indexingKnowledge}
+                              checked={linked || checked}
+                              onChange={(e) => {
+                                setSelectedBlobUrls((prev) => {
+                                  const next = new Set(prev);
+                                  if (e.target.checked) next.add(b.url);
+                                  else next.delete(b.url);
+                                  return next;
+                                });
+                              }}
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate font-medium">{b.name}</span>
+                              <span className="text-gray-500 dark:text-gray-400">
+                                {formatBytes(b.size)}
+                                {linked ? " · ya vinculado" : ""}
+                              </span>
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  {selectedBlobUrls.size > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void handleLinkBlobDocuments()}
+                      disabled={indexingKnowledge}
+                      className="mt-2 w-full rounded-lg border border-emerald-600 bg-emerald-50 px-2 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200"
+                    >
+                      Añadir {selectedBlobUrls.size} seleccionado(s) a knowledge
+                    </button>
+                  )}
+                </div>
               )}
               {config.knowledge_paths.length > 0 && (
                 <ul className={listPanelClass}>
