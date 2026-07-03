@@ -23,7 +23,7 @@ Connection string: **Project Settings → Database → URI → Transaction** (pu
 | Variable | Obligatoria |
 |----------|-------------|
 | `DATABASE_URL` | Sí |
-| `BLOB_READ_WRITE_TOKEN` | Sí (auto al crear Blob) |
+| `BLOB_STORE_ID` o `BLOB_READ_WRITE_TOKEN` | Sí (auto al conectar Blob) |
 | `OPENROUTER_API_KEY` | Sí |
 | `NEXT_PUBLIC_APP_URL` | Recomendada |
 

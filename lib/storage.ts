@@ -6,7 +6,11 @@ const DATA_DIR = path.join(process.cwd(), "data");
 
 /** Serverless (Vercel): sesiones de proyecto en /tmp, no persistentes. */
 export function useEphemeralSessions(): boolean {
-  return !!process.env.VERCEL || !!process.env.BLOB_READ_WRITE_TOKEN?.trim();
+  return (
+    !!process.env.VERCEL ||
+    !!process.env.BLOB_READ_WRITE_TOKEN?.trim() ||
+    !!process.env.BLOB_STORE_ID?.trim()
+  );
 }
 
 export function getDataDir(): string {

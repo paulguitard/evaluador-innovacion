@@ -12,6 +12,7 @@ import { getSupportedExtensions, getProjectUploadExtensions } from "@/lib/docume
 import { indexKnowledge } from "@/lib/rag-index";
 import { ingestProjectFiles } from "@/lib/project-ingest";
 import { saveProjectBuffersToSession } from "@/lib/session-project-files";
+import { useBlobStorage } from "@/lib/blob-storage";
 
 export const maxDuration = 300;
 
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "evaluationTypeId required for knowledge" }, { status: 400 });
       }
       const files = formData.getAll("files") as File[];
-      const useBlob = !!process.env.BLOB_READ_WRITE_TOKEN;
+      const useBlob = useBlobStorage();
 
       if (useBlob) {
         const uploaded: KnowledgeEntry[] = [];
@@ -123,7 +124,7 @@ export async function POST(request: Request) {
       if (!ALLOWED_EXT.has(ext)) {
         return NextResponse.json({ error: "Unsupported file type for rubric" }, { status: 400 });
       }
-      const useBlob = !!process.env.BLOB_READ_WRITE_TOKEN;
+      const useBlob = useBlobStorage();
       if (useBlob) {
         const filename = sanitizeFilename(file.name);
         const pathname = `rubric/${typeId}/${filename}`;
