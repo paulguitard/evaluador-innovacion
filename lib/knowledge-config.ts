@@ -1,17 +1,36 @@
 import { getConfig } from "@/lib/db";
-import { clearKnowledgeVectorsBlob } from "@/lib/blob-chunk-store";
-import { loadChunksAsync, saveChunks, type StoredChunk } from "@/lib/vector-store";
-import { useBlobStorage } from "@/lib/blob-storage";
+import {
+  clearKnowledgeVectorsBlob,
+  headKnowledgeChunksBlob,
+} from "@/lib/blob-chunk-store";
+import {
+  loadChunksAsync,
+  loadChunksMetaAsync,
+  saveChunks,
+  type StoredChunk,
+} from "@/lib/vector-store";
 
-export type KnowledgePathItem = string | { name: string; url: string };
+export type KnowledgePathItem = { name: string; url: string };
 
 export function parseKnowledgePaths(raw: string | null | undefined): KnowledgePathItem[] {
   try {
-    const parsed = JSON.parse(raw || "[]");
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw || "[]") as unknown[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is KnowledgePathItem =>
+        typeof p === "object" &&
+        p != null &&
+        typeof (p as KnowledgePathItem).name === "string" &&
+        typeof (p as KnowledgePathItem).url === "string" &&
+        (p as KnowledgePathItem).url.length > 0
+    );
   } catch {
     return [];
   }
+}
+
+export function knowledgeItemKey(item: KnowledgePathItem): string {
+  return item.name;
 }
 
 export async function getKnowledgePaths(evaluationTypeId: number): Promise<KnowledgePathItem[]> {
@@ -34,21 +53,23 @@ export async function loadActiveChunks(evaluationTypeId: number): Promise<Stored
 }
 
 export async function hasActiveKnowledgeIndex(evaluationTypeId: number): Promise<boolean> {
-  const chunks = await loadActiveChunks(evaluationTypeId);
-  return chunks.length > 0;
+  if (!(await isKnowledgeConfigured(evaluationTypeId))) return false;
+  const meta = await loadChunksMetaAsync(evaluationTypeId);
+  if (typeof meta?.chunkCount === "number") return meta.chunkCount > 0;
+  const headInfo = await headKnowledgeChunksBlob(evaluationTypeId);
+  if (headInfo && headInfo.size > 2) return true;
+  return false;
 }
 
-/** Borra índice en disco/blob si ya no hay knowledge_paths (índice huérfano). */
+/** Borra índice en Blob si ya no hay knowledge_paths (índice huérfano). */
 export async function clearOrphanKnowledgeIndex(evaluationTypeId: number): Promise<boolean> {
   if (await isKnowledgeConfigured(evaluationTypeId)) return false;
-  const existing = await loadChunksAsync(evaluationTypeId);
-  if (existing.length === 0) return false;
+  const headInfo = await headKnowledgeChunksBlob(evaluationTypeId);
+  if (!headInfo || headInfo.size <= 2) return false;
   await saveChunks(evaluationTypeId, [], {
     indexedAt: new Date().toISOString(),
     knowledgeVersion: "empty",
   });
-  if (useBlobStorage()) {
-    await clearKnowledgeVectorsBlob(evaluationTypeId);
-  }
+  await clearKnowledgeVectorsBlob(evaluationTypeId);
   return true;
 }

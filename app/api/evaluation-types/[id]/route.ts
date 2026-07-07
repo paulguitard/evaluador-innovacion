@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getEvaluationTypeById, updateEvaluationType, deleteEvaluationType } from "@/lib/db";
+import { isValidEvalTypeDeletePassword } from "@/lib/eval-type-delete-password";
 
 export async function GET(
   _request: Request,
@@ -40,13 +41,17 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const id = Number((await params).id);
     if (!Number.isInteger(id)) {
       return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+    }
+    const body = await request.json().catch(() => ({}));
+    if (!isValidEvalTypeDeletePassword(body?.password)) {
+      return NextResponse.json({ error: "Contraseña incorrecta" }, { status: 403 });
     }
     await deleteEvaluationType(id);
     return NextResponse.json({ ok: true });

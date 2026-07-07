@@ -5,7 +5,8 @@ import {
   isFocalizacionKeywordList,
   looksLikeFormQuestionContent,
 } from "@/lib/extract-content-quality";
-import { sheetsForElement, isGanttActivitiesElement, isIndicatorsTableElement, isGanttSheetName } from "@/lib/sheet-element-routing";
+import { sheetsForElement, isGanttActivitiesElement, isIndicatorsTableElement, isGanttSheetName, resolveSheetPatterns } from "@/lib/sheet-element-routing";
+import type { ExtractConfig } from "@/lib/evaluation-type-settings";
 import { extractGanttActivitiesFromExcel } from "@/lib/gantt-extract";
 import {
   isGanttColumnHeaderLabel,
@@ -28,13 +29,21 @@ import {
   looksLikeFormLabel,
   isFormRowElement,
 } from "@/lib/form-row-extract";
+import { extractFromQaColumn, isQaColumnWorkbook } from "@/lib/qa-column-extract";
 
-export type ElementDef = { title: string; description: string; section?: string };
+import type { ElementExtractStrategy } from "@/lib/evaluation-type-settings";
+
+export type ElementDef = {
+  title: string;
+  description: string;
+  section?: string;
+  extractStrategy?: ElementExtractStrategy;
+};
 
 export type HeuristicMatch = {
   content: string;
   confidence: number;
-  method: "label_value_row" | "label_value_col" | "merge_block" | "project_title_cell" | "gantt_sheet" | "indicators_sheet" | "none";
+  method: "label_value_row" | "label_value_col" | "merge_block" | "project_title_cell" | "gantt_sheet" | "indicators_sheet" | "qa_column" | "none";
 };
 
 const HIGH_CONFIDENCE = 0.72;
@@ -287,7 +296,8 @@ function extractFromSheet(sheet: ExcelSheet, element: ElementDef): HeuristicMatc
 
 export function extractElementHeuristic(
   structuredFiles: ExcelStructuredData[],
-  element: ElementDef
+  element: ElementDef,
+  options?: { sheetPatterns?: Partial<ExtractConfig["sheetPatterns"]> }
 ): HeuristicMatch {
   if (isProjectNameElement(element)) {
     const detected = detectProjectNameFromExcel(structuredFiles);
@@ -302,6 +312,20 @@ export function extractElementHeuristic(
       );
     }
     return { content: "", confidence: 0, method: "none" };
+  }
+
+  if (isQaColumnWorkbook(structuredFiles)) {
+    const qa = extractFromQaColumn(structuredFiles, element);
+    if (qa && isAcceptableExtractedContent(element, qa.content)) {
+      return applyContentQuality(
+        {
+          content: qa.content,
+          confidence: qa.confidence,
+          method: "qa_column",
+        },
+        element
+      );
+    }
   }
 
   if (isSpecificObjectivesElement(element)) {
@@ -358,15 +382,16 @@ export function extractElementHeuristic(
 
   let best: HeuristicMatch = { content: "", confidence: 0, method: "none" };
 
-  const INDICATORS_SHEET_RE = /indicador/i;
+  const sheetPatterns = options?.sheetPatterns;
+  const indicatorsRe = resolveSheetPatterns(sheetPatterns).indicators;
 
   for (const file of structuredFiles) {
-    const orderedSheets = sheetsForElement(element, file.sheets);
+    const orderedSheets = sheetsForElement(element, file.sheets, sheetPatterns);
 
     for (const sheet of orderedSheets) {
       const sheetNorm = normalizeForMatch(sheet.sheetName);
-      if (isGanttActivitiesElement(element) && !isGanttSheetName(sheet.sheetName)) continue;
-      if (isIndicatorsTableElement(element) && !INDICATORS_SHEET_RE.test(sheetNorm)) continue;
+      if (isGanttActivitiesElement(element) && !isGanttSheetName(sheet.sheetName, sheetPatterns)) continue;
+      if (isIndicatorsTableElement(element) && !indicatorsRe.test(sheetNorm)) continue;
 
       const match = boostMatch(extractFromSheet(sheet, element), sheet.sheetName);
       if (match.confidence > best.confidence) {

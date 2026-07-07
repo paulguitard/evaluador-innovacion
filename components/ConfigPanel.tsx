@@ -4,30 +4,69 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { upload, uploadPresigned } from "@vercel/blob/client";
 import { ExpandIcon } from "@/components/FullscreenOverlay";
 import LlmConfigModal from "@/components/LlmConfigModal";
+import AgentConfigModal from "@/components/AgentConfigModal";
+import BulkConfigModal from "@/components/BulkConfigModal";
+import {
+  RagConfigFields,
+  ExtractConfigFields,
+  ElementStrategyFields,
+} from "@/components/config/TypeSettingsFields";
+import { EvaluationConfigFields } from "@/components/config/EvaluationConfigFields";
+import {
+  defaultEvaluationTypeSettings,
+  type ElementDefConfig,
+  type RagConfig,
+  type ExtractConfig,
+  type ElementExtractStrategy,
+} from "@/lib/evaluation-type-settings";
+import {
+  defaultEvaluationConfig,
+  mergeEvaluationConfig,
+  type EvaluationConfig,
+} from "@/lib/evaluation-config";
+import RubricEditor from "@/components/rubric/RubricEditor";
+import ReportFormatEditor from "@/components/report-format/ReportFormatEditor";
+import {
+  defaultRubricConfigPonderaciones,
+  mergeRubricConfig,
+  type RubricConfig,
+} from "@/lib/rubric-config";
+import {
+  defaultReportFormatPonderaciones,
+  mergeReportFormatConfig,
+  syncReportFormatWithRubric,
+  type ReportFormatConfig,
+} from "@/lib/report-format-config";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 import { MAX_VERCEL_SERVER_UPLOAD_BYTES } from "@/lib/upload-limits";
 
 type EvaluationType = { id: number; name: string };
 type KnowledgeItem = string | { name: string; url: string };
-type ElementDef = { title: string; description: string; section?: string };
+type ElementDef = ElementDefConfig;
 type Config = {
-  prompt: string;
   knowledge_paths: KnowledgeItem[];
-  rubric_path: string;
   elements: ElementDef[];
-  instructions: string;
   report_format: string;
   rubric_prompt: string;
+  rubric_config: RubricConfig;
+  report_format_config: ReportFormatConfig;
+  evaluation_config: EvaluationConfig;
+  rag_config: RagConfig;
+  extract_config: ExtractConfig;
 };
 
+const defaultRubric = defaultRubricConfigPonderaciones();
+const defaultTypeSettings = defaultEvaluationTypeSettings();
 const defaultConfig: Config = {
-  prompt: "",
   knowledge_paths: [],
-  rubric_path: "",
   elements: [],
-  instructions: "",
   report_format: "",
   rubric_prompt: "",
+  rubric_config: defaultRubric,
+  report_format_config: defaultReportFormatPonderaciones(defaultRubric),
+  evaluation_config: defaultEvaluationConfig(),
+  rag_config: defaultTypeSettings.rag,
+  extract_config: defaultTypeSettings.extract,
 };
 
 export default function ConfigPanel({
@@ -53,6 +92,8 @@ export default function ConfigPanel({
   const [indexingKnowledge, setIndexingKnowledge] = useState(false);
   const [knowledgeIndexStatus, setKnowledgeIndexStatus] = useState<string | null>(null);
   const [llmConfigOpen, setLlmConfigOpen] = useState(false);
+  const [agentConfigOpen, setAgentConfigOpen] = useState(false);
+  const [bulkConfigOpen, setBulkConfigOpen] = useState(false);
   const [ragStatus, setRagStatus] = useState<{
     hasIndex: boolean;
     chunkCount: number;
@@ -66,23 +107,20 @@ export default function ConfigPanel({
   const [blobCatalogLoading, setBlobCatalogLoading] = useState(false);
   const [selectedBlobUrls, setSelectedBlobUrls] = useState<Set<string>>(new Set());
   const [blobStorageEnabled, setBlobStorageEnabled] = useState(false);
-
-  const refreshRagStatus = (typeId: number) => {
-    fetch(`/api/config/${typeId}/rag-status`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (typeof data?.chunkCount === "number") {
-          setRagStatus({
-            hasIndex: !!data.hasIndex,
-            chunkCount: data.chunkCount,
-            indexedAt: data.indexedAt ?? null,
-            chunksFileBytes: data.chunksFileBytes ?? 0,
-            knowledgeConfigured: !!data.knowledgeConfigured,
-          });
-        }
-      })
-      .catch(() => setRagStatus(null));
-  };
+  const ragStatusCacheRef = useRef<
+    Map<
+      number,
+      {
+        hasIndex: boolean;
+        chunkCount: number;
+        indexedAt: string | null;
+        chunksFileBytes: number;
+        knowledgeConfigured: boolean;
+      }
+    >
+  >(new Map());
+  const blobCatalogLoadedRef = useRef(false);
+  const selectedTypeIdRef = useRef<number | null>(null);
 
   const loadBlobCatalog = useCallback(() => {
     setBlobCatalogLoading(true);
@@ -99,19 +137,74 @@ export default function ConfigPanel({
       .finally(() => setBlobCatalogLoading(false));
   }, []);
 
-  const linkedKnowledgeUrls = useCallback(
-    () =>
-      new Set(
-        config.knowledge_paths
-          .map((p) => (typeof p === "object" && p?.url ? p.url : null))
-          .filter((u): u is string => !!u)
-      ),
-    [config.knowledge_paths]
+  useEffect(() => {
+    if (!isOpen) {
+      blobCatalogLoadedRef.current = false;
+      return;
+    }
+    fetch("/api/upload/capabilities")
+      .then((r) => r.json())
+      .then((data) => setBlobStorageEnabled(!!data?.blobStorage))
+      .catch(() => setBlobStorageEnabled(false));
+    if (!blobCatalogLoadedRef.current) {
+      blobCatalogLoadedRef.current = true;
+      loadBlobCatalog();
+    }
+  }, [isOpen, loadBlobCatalog]);
+
+  const refreshRagStatus = useCallback((typeId: number, options?: { force?: boolean }) => {
+    const cached = ragStatusCacheRef.current.get(typeId);
+    if (cached && !options?.force) {
+      setRagStatus(cached);
+      return;
+    }
+    if (options?.force) ragStatusCacheRef.current.delete(typeId);
+    fetch(`/api/config/${typeId}/rag-status`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (typeof data?.chunkCount !== "number") return;
+        const status = {
+          hasIndex: !!data.hasIndex,
+          chunkCount: data.chunkCount,
+          indexedAt: data.indexedAt ?? null,
+          chunksFileBytes: data.chunksFileBytes ?? 0,
+          knowledgeConfigured: !!data.knowledgeConfigured,
+        };
+        ragStatusCacheRef.current.set(typeId, status);
+        if (selectedTypeIdRef.current === typeId) setRagStatus(status);
+      })
+      .catch(() => {
+        if (selectedTypeIdRef.current === typeId) setRagStatus(null);
+      });
+  }, []);
+
+  const linkedKnowledge = useCallback(() => {
+    const urls = new Set<string>();
+    const names = new Set<string>();
+    for (const p of config.knowledge_paths) {
+      if (typeof p === "object" && p?.url) urls.add(p.url);
+      const name = typeof p === "string" ? p : p?.name;
+      if (name) names.add(name.toLowerCase());
+    }
+    return { urls, names };
+  }, [config.knowledge_paths]);
+
+  const isBlobLinkedToEvaluation = useCallback(
+    (blob: { url: string; name: string }) => {
+      const { urls, names } = linkedKnowledge();
+      return urls.has(blob.url) || names.has(blob.name.toLowerCase());
+    },
+    [linkedKnowledge]
   );
   const [showElementModal, setShowElementModal] = useState(false);
   const [editingElementIndex, setEditingElementIndex] = useState<number | null>(null);
-  const [elementForm, setElementForm] = useState({ title: "", description: "", section: "General" });
-  type ExpandSectionId = "elements" | "rubric" | "instructions" | "reportFormat";
+  const [elementForm, setElementForm] = useState<{
+    title: string;
+    description: string;
+    section: string;
+    extractStrategy?: ElementExtractStrategy;
+  }>({ title: "", description: "", section: "General" });
+  type ExpandSectionId = "knowledge" | "elements" | "rubric" | "evaluation" | "reportFormat";
   const [expandSection, setExpandSection] = useState<ExpandSectionId | null>(null);
 
   useEffect(() => {
@@ -132,13 +225,17 @@ export default function ConfigPanel({
   }, [isOpen, activeId]);
 
   useEffect(() => {
-    if (!selectedTypeId) {
-      setConfig(defaultConfig);
-      setRagStatus(null);
-      setKnowledgeIndexStatus(null);
+    if (!isOpen || !selectedTypeId) {
+      if (!selectedTypeId) {
+        setConfig(defaultConfig);
+        setRagStatus(null);
+        setKnowledgeIndexStatus(null);
+      }
       return;
     }
-    setRagStatus(null);
+    selectedTypeIdRef.current = selectedTypeId;
+    const cached = ragStatusCacheRef.current.get(selectedTypeId);
+    setRagStatus(cached ?? null);
     setKnowledgeIndexStatus(null);
     setLoading(true);
     fetch(`/api/config/${selectedTypeId}`)
@@ -150,25 +247,39 @@ export default function ConfigPanel({
                 typeof e === "object" && e != null && "title" in e && "description" in e
             )
           : [];
+        const defaults = defaultEvaluationTypeSettings();
+        const typeName = types.find((t) => t.id === selectedTypeId)?.name;
+        const rubric_config = mergeRubricConfig(data.rubric_config, typeName);
+        const report_format_config = mergeReportFormatConfig(data.report_format_config, rubric_config);
         setConfig({
-          prompt: data.prompt ?? "",
           knowledge_paths: Array.isArray(data.knowledge_paths) ? data.knowledge_paths : [],
-          rubric_path: data.rubric_path ?? "",
-          elements: elements.map((e: { title: string; description: string; section?: string }) => ({
+          elements: elements.map((e: ElementDef) => ({
             title: String(e.title ?? ""),
             description: String(e.description ?? ""),
-            section: typeof (e as { section?: string }).section === "string" ? (e as { section: string }).section : "General",
+            section: typeof e.section === "string" ? e.section : "General",
+            extractStrategy: e.extractStrategy,
           })),
-          instructions: data.instructions ?? "",
           report_format: data.report_format ?? "",
           rubric_prompt: data.rubric_prompt ?? "",
+          rubric_config,
+          report_format_config,
+          evaluation_config: mergeEvaluationConfig(
+            {
+              evaluation_config: data.evaluation_config,
+              pipeline_config: data.pipeline_config,
+              report_format_config,
+              rag_config: data.rag_config,
+            },
+            typeName
+          ),
+          rag_config: data.rag_config ?? defaults.rag,
+          extract_config: data.extract_config ?? defaults.extract,
         });
       })
       .catch(() => setConfig(defaultConfig))
       .finally(() => setLoading(false));
     refreshRagStatus(selectedTypeId);
-    loadBlobCatalog();
-  }, [selectedTypeId, loadBlobCatalog]);
+  }, [isOpen, selectedTypeId, refreshRagStatus, types]);
 
   const handleCreateType = async () => {
     const name = newTypeName.trim();
@@ -196,10 +307,19 @@ export default function ConfigPanel({
 
   const handleDeleteType = async (id: number) => {
     if (!confirm("¿Eliminar este tipo de evaluación?")) return;
-    const res = await fetch(`/api/evaluation-types/${id}`, { method: "DELETE" });
+    const password = window.prompt("Contraseña para eliminar:");
+    if (password === null) return;
+    const res = await fetch(`/api/evaluation-types/${id}`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
     if (res.ok) {
       onTypesChange();
       if (selectedTypeId === id) setSelectedTypeId(types[0]?.id ?? null);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      alert(typeof err?.error === "string" ? err.error : "No se pudo eliminar el tipo.");
     }
   };
 
@@ -212,9 +332,13 @@ export default function ConfigPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           elements: config.elements,
-          instructions: config.instructions,
           report_format: config.report_format,
           rubric_prompt: config.rubric_prompt,
+          rubric_config: config.rubric_config,
+          report_format_config: config.report_format_config,
+          evaluation_config: config.evaluation_config,
+          rag_config: config.rag_config,
+          extract_config: config.extract_config,
         }),
       });
       if (!res.ok) throw new Error((await res.json()).error || "Error");
@@ -289,7 +413,7 @@ export default function ConfigPanel({
         setConfig((c) => ({ ...c, knowledge_paths: data.knowledge_paths ?? c.knowledge_paths }));
         onTypesChange();
         setKnowledgeIndexStatus(formatIndexStatus(data.chunkCount, data.indexError));
-        if (selectedTypeId) refreshRagStatus(selectedTypeId);
+        if (selectedTypeId) refreshRagStatus(selectedTypeId, { force: true });
         return;
       }
 
@@ -305,7 +429,7 @@ export default function ConfigPanel({
       setConfig((c) => ({ ...c, knowledge_paths: data.knowledge_paths ?? c.knowledge_paths }));
       onTypesChange();
       setKnowledgeIndexStatus(formatIndexStatus(data.chunkCount, data.indexError));
-      if (selectedTypeId) refreshRagStatus(selectedTypeId);
+      if (selectedTypeId) refreshRagStatus(selectedTypeId, { force: true });
     } catch (err) {
       setKnowledgeIndexStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -332,7 +456,7 @@ export default function ConfigPanel({
       if (!res.ok) throw new Error(data?.error || "Error al eliminar");
       setConfig((c) => ({ ...c, knowledge_paths: newPaths }));
       setKnowledgeIndexStatus(formatIndexStatus(data.chunkCount, data.indexError) ?? "Documento eliminado.");
-      refreshRagStatus(selectedTypeId);
+      refreshRagStatus(selectedTypeId, { force: true });
     } catch (err) {
       setKnowledgeIndexStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -360,7 +484,7 @@ export default function ConfigPanel({
       onTypesChange();
       setSelectedBlobUrls(new Set());
       setKnowledgeIndexStatus(formatIndexStatus(data.chunkCount, data.indexError));
-      refreshRagStatus(selectedTypeId);
+      refreshRagStatus(selectedTypeId, { force: true });
     } catch (err) {
       setKnowledgeIndexStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -377,7 +501,7 @@ export default function ConfigPanel({
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || "Error al reindexar");
       setKnowledgeIndexStatus(formatIndexStatus(data.chunkCount) ?? "Índice actualizado.");
-      refreshRagStatus(selectedTypeId);
+      refreshRagStatus(selectedTypeId, { force: true });
     } catch (err) {
       setKnowledgeIndexStatus(err instanceof Error ? err.message : String(err));
     } finally {
@@ -421,6 +545,7 @@ export default function ConfigPanel({
       title: el.title,
       description: el.description,
       section: el.section ?? "General",
+      extractStrategy: el.extractStrategy,
     });
     setEditingElementIndex(index);
     setShowElementModal(true);
@@ -431,6 +556,7 @@ export default function ConfigPanel({
       title: elementForm.title.trim(),
       description: elementForm.description.trim(),
       section,
+      extractStrategy: elementForm.extractStrategy,
     };
     if (editingElementIndex !== null) {
       setConfig((c) => ({
@@ -531,8 +657,6 @@ export default function ConfigPanel({
     "rounded border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700";
   const uploadZoneClass =
     "flex min-w-0 flex-1 items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-300 bg-white py-3 text-sm font-medium text-gray-700 transition hover:border-gray-400 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-gray-500 dark:hover:bg-gray-700";
-  const listPanelClass =
-    "mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto rounded bg-gray-100 px-2 py-2 text-xs text-gray-600 dark:bg-gray-700 dark:text-gray-300";
   const modalShellClass =
     "flex h-[90vh] w-full max-w-[95vw] flex-col rounded-lg border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-[#252526]";
   const modalSubShellClass =
@@ -540,15 +664,217 @@ export default function ConfigPanel({
   const iconBtnClass =
     "shrink-0 rounded p-2 text-gray-500 hover:bg-gray-100 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-700 dark:hover:text-gray-200";
 
+  const knowledgeBody = (
+    <>
+      <div className="mt-3 flex shrink-0 flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => knowledgeInputRef.current?.click()}
+          disabled={indexingKnowledge}
+          className={uploadZoneClass}
+        >
+          <svg className="h-5 w-5 shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+          </svg>
+          {indexingKnowledge ? "Indexando…" : "Subir documentos"}
+        </button>
+        {config.knowledge_paths.length > 0 && (
+          <button
+            type="button"
+            onClick={handleReindexKnowledge}
+            disabled={indexingKnowledge}
+            className="shrink-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+          >
+            Reindexar RAG
+          </button>
+        )}
+      </div>
+      {ragStatus && (
+        <p className="mt-2 shrink-0 text-xs text-gray-500 dark:text-gray-400">
+          Índice RAG:{" "}
+          {!ragStatus.knowledgeConfigured
+            ? "sin documentos configurados para este tipo de evaluación"
+            : ragStatus.hasIndex
+              ? `${ragStatus.chunkCount} fragmentos · ${formatBytes(ragStatus.chunksFileBytes)}${
+                  ragStatus.indexedAt
+                    ? ` · ${new Date(ragStatus.indexedAt).toLocaleString("es-CL")}`
+                    : ""
+                }`
+              : "sin indexar (pulse Reindexar RAG tras subir documentos)"}
+        </p>
+      )}
+      {knowledgeIndexStatus && (
+        <p
+          className={`mt-1 shrink-0 text-xs ${
+            knowledgeIndexStatus.startsWith("Error") || knowledgeIndexStatus.includes("Error al indexar")
+              ? "text-red-600 dark:text-red-400"
+              : "text-emerald-700 dark:text-emerald-400"
+          }`}
+        >
+          {knowledgeIndexStatus}
+        </p>
+      )}
+      <RagConfigFields
+        rag={config.rag_config}
+        onChange={(rag_config) => setConfig((c) => ({ ...c, rag_config }))}
+      />
+      {!blobStorageEnabled && (
+        <p className="mt-2 shrink-0 rounded-lg border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200">
+          Falta autenticación de servidor para Blob. Añade{" "}
+          <code className="text-[11px]">BLOB_READ_WRITE_TOKEN</code> en{" "}
+          <code className="text-[11px]">.env.local</code> (desde Vercel → Storage → tu Blob store → token), o ejecuta{" "}
+          <code className="text-[11px]">npx vercel env pull .env.local</code> para obtener{" "}
+          <code className="text-[11px]">VERCEL_OIDC_TOKEN</code>. Luego reinicia{" "}
+          <code className="text-[11px]">npm run dev</code>.
+        </p>
+      )}
+      <div className="mt-3 flex min-h-0 flex-1 gap-2 overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-gray-200 bg-gray-50/80 p-2 dark:border-gray-600 dark:bg-gray-900/40">
+          <span className="mb-2 shrink-0 text-xs font-medium text-gray-600 dark:text-gray-400">
+            Archivos cargados
+          </span>
+          {config.knowledge_paths.length === 0 ? (
+            <p className="text-xs text-gray-500 dark:text-gray-400">Ningún documento en esta evaluación.</p>
+          ) : (
+            <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto text-xs">
+              {config.knowledge_paths.map((p, i) => (
+                <li
+                  key={i}
+                  className="flex items-center justify-between gap-2 rounded bg-emerald-50/80 px-2 py-1 dark:bg-emerald-950/30"
+                >
+                  <span className="min-w-0 truncate font-medium text-gray-700 dark:text-gray-200">
+                    {typeof p === "string" ? p : p.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveKnowledge(i)}
+                    disabled={indexingKnowledge}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-gray-400 hover:bg-red-100 hover:text-red-700 disabled:opacity-50 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+                    title="Eliminar documento"
+                    aria-label="Eliminar documento"
+                  >
+                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {blobStorageEnabled && (
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-gray-200 bg-gray-50/80 p-2 dark:border-gray-600 dark:bg-gray-900/40">
+            <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
+              <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Disponibles en Blob</span>
+              <button
+                type="button"
+                onClick={loadBlobCatalog}
+                disabled={blobCatalogLoading}
+                className="text-xs text-gray-500 underline hover:text-gray-700 dark:hover:text-gray-300"
+              >
+                {blobCatalogLoading ? "Cargando…" : "Actualizar"}
+              </button>
+            </div>
+            {blobCatalog.length === 0 ? (
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                {blobCatalogLoading ? "Buscando archivos…" : "No hay documentos en el almacenamiento."}
+              </p>
+            ) : (
+              <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto text-xs">
+                {blobCatalog.map((b) => {
+                  const linked = isBlobLinkedToEvaluation(b);
+                  const checked = selectedBlobUrls.has(b.url);
+                  return (
+                    <li
+                      key={b.url}
+                      className={`flex items-start gap-2 rounded px-1 py-0.5 ${
+                        linked
+                          ? "bg-emerald-100/70 dark:bg-emerald-900/40"
+                          : "hover:bg-gray-100 dark:hover:bg-gray-800"
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        disabled={linked || indexingKnowledge}
+                        checked={linked || checked}
+                        onChange={(e) => {
+                          setSelectedBlobUrls((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(b.url);
+                            else next.delete(b.url);
+                            return next;
+                          });
+                        }}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-1.5">
+                          <span
+                            className={`block truncate font-medium ${linked ? "text-emerald-800 dark:text-emerald-200" : ""}`}
+                          >
+                            {b.name}
+                          </span>
+                          {linked && (
+                            <span className="shrink-0 rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white dark:bg-emerald-700">
+                              Cargado
+                            </span>
+                          )}
+                        </span>
+                        <span className="text-gray-500 dark:text-gray-400">{formatBytes(b.size)}</span>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {selectedBlobUrls.size > 0 && (
+              <button
+                type="button"
+                onClick={() => void handleLinkBlobDocuments()}
+                disabled={indexingKnowledge}
+                className="mt-2 w-full shrink-0 rounded-lg border border-emerald-600 bg-emerald-50 px-2 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200"
+              >
+                Añadir {selectedBlobUrls.size} seleccionado(s) a knowledge
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </>
+  );
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <div
         className={modalShellClass}
         onClick={(e) => e.stopPropagation()}
       >
+        <input
+          ref={knowledgeInputRef}
+          type="file"
+          multiple
+          accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md,.json"
+          className="sr-only"
+          onChange={handleUploadKnowledge}
+        />
         <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-600">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Configuración</h2>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setBulkConfigOpen(true)}
+              className="rounded border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+            >
+              Configurar masivo
+            </button>
+            <button
+              type="button"
+              onClick={() => setAgentConfigOpen(true)}
+              className="rounded border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700"
+            >
+              Configurar agente
+            </button>
             <button
               type="button"
               onClick={() => setLlmConfigOpen(true)}
@@ -579,40 +905,58 @@ export default function ConfigPanel({
         <div className="grid min-h-0 flex-1 grid-cols-3 grid-rows-[1fr_1fr] gap-6 overflow-hidden p-6">
           {/* Celda uniforme: todas las secciones mismo ancho y alto */}
           <section className={`${sectionClass} flex min-h-0 flex-col overflow-hidden`}>
-            <h3 className={sectionTitleClass}>1. Tipo de evaluación</h3>
-            <p className="mt-0.5 shrink-0 text-xs text-gray-500 dark:text-gray-400">
-              Cree un tipo o seleccione uno existente. La configuración aplica al tipo seleccionado.
-            </p>
-            <div className="mt-3 flex shrink-0 gap-2">
+            <div className="flex shrink-0 items-baseline justify-between gap-2">
+              <h3 className={sectionTitleClass}>1. Tipo de evaluación</h3>
+              {selectedTypeId && (
+                <span className="truncate text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                  {types.find((t) => t.id === selectedTypeId)?.name}
+                </span>
+              )}
+            </div>
+            <div className="mt-2 flex shrink-0 gap-1.5">
               <input
                 type="text"
                 value={newTypeName}
                 onChange={(e) => setNewTypeName(e.target.value)}
-                placeholder="Nombre del tipo (ej. IGIP, TRL)"
-                className={`flex-1 ${inputClass}`}
+                placeholder="Nuevo tipo (IGIP, TRL…)"
+                className={`min-w-0 flex-1 ${inputClass} py-1.5 text-xs`}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleCreateType();
+                }}
               />
               <button
                 type="button"
                 onClick={handleCreateType}
                 disabled={saving || !newTypeName.trim()}
-                className={btnPrimaryClass}
+                className={`shrink-0 px-3 py-1.5 text-xs ${btnPrimaryClass}`}
               >
                 Crear
               </button>
             </div>
             {types.length > 0 && (
-              <div className="mt-3 min-h-0 flex-1 overflow-y-auto">
-                <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Seleccionar tipo:</span>
-                <ul className="mt-1 space-y-1">
-                  {types.map((t) => (
-                    <li key={t.id} className="flex items-center gap-2">
+              <div
+                className="mt-2 flex shrink-0 flex-wrap items-center gap-1 border-b border-gray-200 pb-2 dark:border-gray-600"
+                role="tablist"
+                aria-label="Tipos de evaluación"
+              >
+                {types.map((t) => {
+                  const selected = selectedTypeId === t.id;
+                  return (
+                    <span
+                      key={t.id}
+                      className={`inline-flex items-center overflow-hidden rounded-md border text-xs ${
+                        selected
+                          ? "border-gray-400 bg-gray-200 dark:border-gray-500 dark:bg-gray-600"
+                          : "border-gray-300 bg-white dark:border-gray-600 dark:bg-gray-800"
+                      }`}
+                    >
                       <button
                         type="button"
+                        role="tab"
+                        aria-selected={selected}
                         onClick={() => setSelectedTypeId(t.id)}
-                        className={`flex-1 rounded px-3 py-2 text-left text-sm ${
-                          selectedTypeId === t.id
-                            ? "bg-gray-300 font-medium dark:bg-gray-600 dark:text-white"
-                            : "hover:bg-gray-200 dark:hover:bg-gray-700"
+                        className={`px-2.5 py-1 font-medium ${
+                          selected ? "text-gray-900 dark:text-white" : "text-gray-600 dark:text-gray-300"
                         }`}
                       >
                         {t.name}
@@ -620,159 +964,52 @@ export default function ConfigPanel({
                       <button
                         type="button"
                         onClick={() => handleDeleteType(t.id)}
-                        className="rounded px-2 py-1 text-xs text-gray-500 hover:bg-red-100 hover:text-red-700 dark:hover:bg-red-900/30 dark:hover:text-red-400"
+                        className="border-l border-gray-300 px-1.5 py-1 text-gray-400 hover:bg-red-50 hover:text-red-600 dark:border-gray-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+                        title={`Eliminar ${t.name}`}
+                        aria-label={`Eliminar ${t.name}`}
                       >
-                        Eliminar
+                        ×
                       </button>
-                    </li>
-                  ))}
-                </ul>
+                    </span>
+                  );
+                })}
               </div>
             )}
+            <div className="mt-2 min-h-0 flex-1 overflow-y-auto">
+              {selectedTypeId ? (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Los parámetros de evaluación están en la sección 5.
+                </p>
+              ) : types.length === 0 ? (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Cree un tipo para configurar el pipeline de evaluación.
+                </p>
+              ) : (
+                <p className="text-xs text-gray-500 dark:text-gray-400">Seleccione un tipo arriba.</p>
+              )}
+            </div>
           </section>
 
           {selectedTypeId ? (
             <section className={`${sectionClass} flex min-h-0 flex-col overflow-hidden`}>
-              <h3 className={sectionTitleClass}>2. Documentos de referencia (Knowledge)</h3>
-              <p className="mt-0.5 shrink-0 text-xs text-gray-500 dark:text-gray-400">
-                Archivos que el evaluador usará como base de conocimiento (PDF, Word, Excel, texto, etc.).
-              </p>
-              <input
-                ref={knowledgeInputRef}
-                type="file"
-                multiple
-                accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md,.json"
-                className="sr-only"
-                onChange={handleUploadKnowledge}
-              />
-              <div className="mt-3 flex shrink-0 flex-wrap gap-2">
+              <div className="flex shrink-0 items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <h3 className={sectionTitleClass}>2. Documentos de referencia (Knowledge)</h3>
+                  <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                    Archivos que el evaluador usará como base de conocimiento (PDF, Word, Excel, texto, etc.).
+                  </p>
+                </div>
                 <button
                   type="button"
-                  onClick={() => knowledgeInputRef.current?.click()}
-                  disabled={indexingKnowledge}
-                  className={uploadZoneClass}
+                  onClick={() => setExpandSection("knowledge")}
+                  className={iconBtnClass}
+                  title="Ampliar en ventana nueva"
+                  aria-label="Ampliar sección"
                 >
-                  <svg className="h-5 w-5 shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                  </svg>
-                  {indexingKnowledge ? "Indexando…" : "Subir documentos"}
+                  <ExpandIcon />
                 </button>
-                {config.knowledge_paths.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={handleReindexKnowledge}
-                    disabled={indexingKnowledge}
-                    className={`shrink-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700`}
-                  >
-                    Reindexar RAG
-                  </button>
-                )}
               </div>
-              {ragStatus && (
-                <p className="mt-2 shrink-0 text-xs text-gray-500 dark:text-gray-400">
-                  Índice RAG:{" "}
-                  {!ragStatus.knowledgeConfigured
-                    ? "sin documentos configurados para este tipo de evaluación"
-                    : ragStatus.hasIndex
-                      ? `${ragStatus.chunkCount} fragmentos · ${formatBytes(ragStatus.chunksFileBytes)}${
-                          ragStatus.indexedAt
-                            ? ` · ${new Date(ragStatus.indexedAt).toLocaleString("es-CL")}`
-                            : ""
-                        }`
-                      : "sin indexar (pulse Reindexar RAG tras subir documentos)"}
-                </p>
-              )}
-              {knowledgeIndexStatus && (
-                <p className={`mt-1 shrink-0 text-xs ${knowledgeIndexStatus.startsWith("Error") || knowledgeIndexStatus.includes("Error al indexar") ? "text-red-600 dark:text-red-400" : "text-emerald-700 dark:text-emerald-400"}`}>
-                  {knowledgeIndexStatus}
-                </p>
-              )}
-              {blobStorageEnabled && (
-                <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-lg border border-gray-200 bg-gray-50/80 p-2 dark:border-gray-600 dark:bg-gray-900/40">
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <span className="text-xs font-medium text-gray-600 dark:text-gray-400">
-                      Documentos en Vercel Blob
-                    </span>
-                    <button
-                      type="button"
-                      onClick={loadBlobCatalog}
-                      disabled={blobCatalogLoading}
-                      className="text-xs text-gray-500 underline hover:text-gray-700 dark:hover:text-gray-300"
-                    >
-                      {blobCatalogLoading ? "Cargando…" : "Actualizar"}
-                    </button>
-                  </div>
-                  {blobCatalog.length === 0 ? (
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                      {blobCatalogLoading ? "Buscando archivos…" : "No hay documentos en el almacenamiento."}
-                    </p>
-                  ) : (
-                    <ul className="max-h-36 space-y-1 overflow-y-auto text-xs">
-                      {blobCatalog.map((b) => {
-                        const linked = linkedKnowledgeUrls().has(b.url);
-                        const checked = selectedBlobUrls.has(b.url);
-                        return (
-                          <li key={b.url} className="flex items-start gap-2 rounded px-1 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800">
-                            <input
-                              type="checkbox"
-                              className="mt-0.5"
-                              disabled={linked || indexingKnowledge}
-                              checked={linked || checked}
-                              onChange={(e) => {
-                                setSelectedBlobUrls((prev) => {
-                                  const next = new Set(prev);
-                                  if (e.target.checked) next.add(b.url);
-                                  else next.delete(b.url);
-                                  return next;
-                                });
-                              }}
-                            />
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate font-medium">{b.name}</span>
-                              <span className="text-gray-500 dark:text-gray-400">
-                                {formatBytes(b.size)}
-                                {linked ? " · ya vinculado" : ""}
-                              </span>
-                            </span>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                  {selectedBlobUrls.size > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => void handleLinkBlobDocuments()}
-                      disabled={indexingKnowledge}
-                      className="mt-2 w-full rounded-lg border border-emerald-600 bg-emerald-50 px-2 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-100 disabled:opacity-50 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200"
-                    >
-                      Añadir {selectedBlobUrls.size} seleccionado(s) a knowledge
-                    </button>
-                  )}
-                </div>
-              )}
-              {config.knowledge_paths.length > 0 && (
-                <ul className={listPanelClass}>
-                  <span className="font-medium">Archivos cargados:</span>
-                  {config.knowledge_paths.map((p, i) => (
-                    <li key={i} className="flex items-center justify-between gap-2 pl-1">
-                      <span className="min-w-0 truncate">{typeof p === "string" ? p : p.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveKnowledge(i)}
-                        disabled={indexingKnowledge}
-                        className="shrink-0 rounded px-1.5 py-0.5 text-gray-400 hover:bg-red-100 hover:text-red-700 disabled:opacity-50 dark:hover:bg-red-900/30 dark:hover:text-red-400"
-                        title="Eliminar documento"
-                        aria-label="Eliminar documento"
-                      >
-                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              {expandSection !== "knowledge" && knowledgeBody}
             </section>
           ) : (
             <section className={`${sectionClass} flex min-h-0 flex-col items-center justify-center overflow-hidden`}>
@@ -800,6 +1037,12 @@ export default function ConfigPanel({
                 >
                   <ExpandIcon />
                 </button>
+              </div>
+              <div className="mt-3 shrink-0">
+                <ExtractConfigFields
+                  extract={config.extract_config}
+                  onChange={(extract_config) => setConfig((c) => ({ ...c, extract_config }))}
+                />
               </div>
               <div className="mt-3 min-h-0 flex-1 space-y-3 overflow-y-auto">
                 {(() => {
@@ -943,7 +1186,7 @@ export default function ConfigPanel({
                 <div className="min-w-0 flex-1">
                   <h3 className={sectionTitleClass}>4. Rúbrica</h3>
                   <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                    Texto de la rúbrica: criterios, niveles y ponderaciones. El LLM usará esto para evaluar.
+                    Criterios por ponderaciones o niveles. La escala de notas se configura aquí (§4).
                   </p>
                 </div>
                 <button
@@ -956,13 +1199,21 @@ export default function ConfigPanel({
                   <ExpandIcon />
                 </button>
               </div>
-              <textarea
-                value={config.rubric_prompt}
-                onChange={(e) => setConfig((c) => ({ ...c, rubric_prompt: e.target.value }))}
-                rows={6}
-                className={`mt-3 min-h-0 flex-1 resize-none ${inputClass} font-mono`}
-                placeholder="Describa la rúbrica: dimensiones, subcriterios, niveles (1-4), porcentajes..."
-              />
+              <div className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden">
+                <RubricEditor
+                  value={config.rubric_config}
+                  onChange={(rubric_config) =>
+                    setConfig((c) => ({
+                      ...c,
+                      rubric_config,
+                      report_format_config: syncReportFormatWithRubric(
+                        c.report_format_config,
+                        rubric_config
+                      ),
+                    }))
+                  }
+                />
+              </div>
             </section>
           ) : (
             <section className={`${sectionClass} flex min-h-0 flex-col items-center justify-center overflow-hidden`} />
@@ -972,14 +1223,15 @@ export default function ConfigPanel({
             <section className={`${sectionClass} flex min-h-0 flex-col overflow-hidden`}>
               <div className="flex shrink-0 items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <h3 className={sectionTitleClass}>5. Instrucciones</h3>
+                  <h3 className={sectionTitleClass}>5. Evaluación</h3>
                   <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                    Instrucciones y contexto general para que el LLM realice la evaluación según elementos, contenidos y rúbrica.
+                    Parámetros del proceso de evaluación: metodología programada, límites por fase y
+                    opciones de RAG.
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setExpandSection("instructions")}
+                  onClick={() => setExpandSection("evaluation")}
                   className={iconBtnClass}
                   title="Ampliar en ventana nueva"
                   aria-label="Ampliar sección"
@@ -987,13 +1239,13 @@ export default function ConfigPanel({
                   <ExpandIcon />
                 </button>
               </div>
-              <textarea
-                value={config.instructions}
-                onChange={(e) => setConfig((c) => ({ ...c, instructions: e.target.value }))}
-                rows={6}
-                className={`mt-3 min-h-0 flex-1 resize-none ${inputClass} font-mono`}
-                placeholder="Ej.: Evalúa el proyecto usando el manual de Oslo y la rúbrica. Basa las notas en los elementos identificados..."
-              />
+              <div className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden">
+                <EvaluationConfigFields
+                  evaluation={config.evaluation_config}
+                  rubric={config.rubric_config}
+                  onChange={(evaluation_config) => setConfig((c) => ({ ...c, evaluation_config }))}
+                />
+              </div>
             </section>
           ) : (
             <section className={`${sectionClass} flex min-h-0 flex-col items-center justify-center overflow-hidden`} />
@@ -1005,7 +1257,7 @@ export default function ConfigPanel({
                 <div className="min-w-0 flex-1">
                   <h3 className={sectionTitleClass}>6. Formato de informe</h3>
                   <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-                    Estructura, secciones y presentación del informe de evaluación.
+                    Estructura obligatoria según la rúbrica; secciones extra opcionales al inicio o antes del cierre.
                   </p>
                 </div>
                 <button
@@ -1018,19 +1270,50 @@ export default function ConfigPanel({
                   <ExpandIcon />
                 </button>
               </div>
-              <textarea
-                value={config.report_format}
-                onChange={(e) => setConfig((c) => ({ ...c, report_format: e.target.value }))}
-                rows={6}
-                className={`mt-3 min-h-0 flex-1 resize-none ${inputClass} font-mono`}
-                placeholder="Ej.: Incluye: 1. Resumen, 2. Notas por dimensión, 3. Justificación por criterio, 4. Recomendaciones..."
-              />
+              <div className="mt-3 flex min-h-0 flex-1 flex-col overflow-hidden">
+                <ReportFormatEditor
+                  value={config.report_format_config}
+                  rubric={config.rubric_config}
+                  onChange={(report_format_config) =>
+                    setConfig((c) => ({ ...c, report_format_config }))
+                  }
+                />
+              </div>
             </section>
           ) : (
             <section className={`${sectionClass} flex min-h-0 flex-col items-center justify-center overflow-hidden`} />
           )}
         </div>
 
+        {expandSection === "knowledge" && (
+          <div
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Documentos de referencia - ampliado"
+            onClick={() => setExpandSection(null)}
+          >
+            <div
+              className="flex h-full max-h-[90vh] w-full max-w-5xl flex-col rounded-lg border border-gray-300 bg-white shadow-xl dark:border-gray-600 dark:bg-[#1e1e1e]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gray-200 px-4 py-3 dark:border-gray-700">
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                  2. Documentos de referencia (Knowledge)
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => setExpandSection(null)}
+                  className="rounded p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700"
+                  aria-label="Cerrar"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">{knowledgeBody}</div>
+            </div>
+          </div>
+        )}
         {expandSection === "elements" && (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-label="Elementos a identificar - ampliado" onClick={() => setExpandSection(null)}>
             <div className={modalSubShellClass} onClick={(e) => e.stopPropagation()}>
@@ -1039,7 +1322,11 @@ export default function ConfigPanel({
                 <button type="button" onClick={() => setExpandSection(null)} className="rounded p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700" aria-label="Cerrar">✕</button>
               </div>
               <div className="min-h-0 flex-1 overflow-y-auto p-4">
-                <div className="space-y-3 text-sm text-gray-800 dark:text-gray-200">
+                <ExtractConfigFields
+                  extract={config.extract_config}
+                  onChange={(extract_config) => setConfig((c) => ({ ...c, extract_config }))}
+                />
+                <div className="mt-4 space-y-3 text-sm text-gray-800 dark:text-gray-200">
                   {(() => {
                     const bySection = new Map<string, ElementDef[]>();
                     config.elements.forEach((el) => {
@@ -1081,30 +1368,36 @@ export default function ConfigPanel({
                 <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">4. Rúbrica</h2>
                 <button type="button" onClick={() => setExpandSection(null)} className="rounded p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700" aria-label="Cerrar">✕</button>
               </div>
-              <div className="min-h-0 flex-1 overflow-hidden p-4">
-                <textarea
-                  value={config.rubric_prompt}
-                  onChange={(e) => setConfig((c) => ({ ...c, rubric_prompt: e.target.value }))}
-                  className={`h-full min-h-[300px] w-full resize-none font-mono ${inputClass}`}
-                  placeholder="Describa la rúbrica: dimensiones, subcriterios, niveles (1-4), porcentajes..."
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
+                <RubricEditor
+                  value={config.rubric_config}
+                  onChange={(rubric_config) =>
+                    setConfig((c) => ({
+                      ...c,
+                      rubric_config,
+                      report_format_config: syncReportFormatWithRubric(
+                        c.report_format_config,
+                        rubric_config
+                      ),
+                    }))
+                  }
                 />
               </div>
             </div>
           </div>
         )}
-        {expandSection === "instructions" && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-label="Instrucciones - ampliado" onClick={() => setExpandSection(null)}>
+        {expandSection === "evaluation" && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" role="dialog" aria-modal="true" aria-label="Evaluación - ampliado" onClick={() => setExpandSection(null)}>
             <div className={modalSubShellClass} onClick={(e) => e.stopPropagation()}>
               <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gray-200 px-4 py-3 dark:border-gray-700">
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">5. Instrucciones</h2>
+                <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">5. Evaluación</h2>
                 <button type="button" onClick={() => setExpandSection(null)} className="rounded p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700" aria-label="Cerrar">✕</button>
               </div>
               <div className="min-h-0 flex-1 overflow-hidden p-4">
-                <textarea
-                  value={config.instructions}
-                  onChange={(e) => setConfig((c) => ({ ...c, instructions: e.target.value }))}
-                  className={`h-full min-h-[300px] w-full resize-none font-mono ${inputClass}`}
-                  placeholder="Ej.: Evalúa el proyecto usando el manual de Oslo y la rúbrica..."
+                <EvaluationConfigFields
+                  evaluation={config.evaluation_config}
+                  rubric={config.rubric_config}
+                  onChange={(evaluation_config) => setConfig((c) => ({ ...c, evaluation_config }))}
                 />
               </div>
             </div>
@@ -1117,12 +1410,13 @@ export default function ConfigPanel({
                 <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">6. Formato de informe</h2>
                 <button type="button" onClick={() => setExpandSection(null)} className="rounded p-2 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700" aria-label="Cerrar">✕</button>
               </div>
-              <div className="min-h-0 flex-1 overflow-hidden p-4">
-                <textarea
-                  value={config.report_format}
-                  onChange={(e) => setConfig((c) => ({ ...c, report_format: e.target.value }))}
-                  className={`h-full min-h-[300px] w-full resize-none font-mono ${inputClass}`}
-                  placeholder="Ej.: Incluye: 1. Resumen, 2. Notas por dimensión..."
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
+                <ReportFormatEditor
+                  value={config.report_format_config}
+                  rubric={config.rubric_config}
+                  onChange={(report_format_config) =>
+                    setConfig((c) => ({ ...c, report_format_config }))
+                  }
                 />
               </div>
             </div>
@@ -1135,7 +1429,7 @@ export default function ConfigPanel({
             onClick={() => setShowElementModal(false)}
           >
             <div
-              className="w-full max-w-md rounded-lg border border-gray-200 bg-white p-5 shadow-xl dark:border-gray-600 dark:bg-[#252526]"
+              className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-lg border border-gray-200 bg-white p-5 shadow-xl dark:border-gray-600 dark:bg-[#252526]"
               onClick={(e) => e.stopPropagation()}
             >
               <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
@@ -1221,6 +1515,10 @@ export default function ConfigPanel({
                     );
                   })()}
                 </div>
+                <ElementStrategyFields
+                  strategy={elementForm.extractStrategy}
+                  onChange={(extractStrategy) => setElementForm((f) => ({ ...f, extractStrategy }))}
+                />
               </div>
               <div className="mt-5 flex justify-end gap-2">
                 <button
@@ -1243,6 +1541,8 @@ export default function ConfigPanel({
           </div>
         )}
       </div>
+      <AgentConfigModal isOpen={agentConfigOpen} onClose={() => setAgentConfigOpen(false)} />
+      <BulkConfigModal isOpen={bulkConfigOpen} onClose={() => setBulkConfigOpen(false)} />
       <LlmConfigModal isOpen={llmConfigOpen} onClose={() => setLlmConfigOpen(false)} />
     </div>
   );

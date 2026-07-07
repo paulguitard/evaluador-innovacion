@@ -7,6 +7,12 @@ import {
   parseProjectNameFromCellText,
   sheetPriorityScore,
 } from "@/lib/excel-sheet-priority";
+import {
+  extractFromQaColumn,
+  isQaColumnWorkbook,
+  looksLikeFormPromptText,
+} from "@/lib/qa-column-extract";
+import { looksLikeFormLabel } from "@/lib/form-row-extract";
 
 export type ProjectNameCandidate = {
   text: string;
@@ -40,6 +46,10 @@ function isInvalidProjectName(text: string): boolean {
   if ((t.match(/\n/g) ?? []).length >= 2) return true;
   if (LABEL_LIKE.test(t) && t.length < 35 && !/proyecto/i.test(t)) return true;
   if (/^objetivo\s+(general|espec)/i.test(t)) return true;
+  if (looksLikeFormPromptText(t)) return true;
+  if (looksLikeFormLabel(t) && /describe|emprendimiento|proyecto|negocio|indica|cu[eé]ntanos/i.test(t)) {
+    return true;
+  }
   return false;
 }
 
@@ -148,9 +158,30 @@ function collectCandidatesFromSheet(sheet: ExcelSheet, sheetIndex: number): Proj
  * Detecta el nombre del proyecto en Excel: texto más arriba y/o más prominente
  * (filas superiores, celdas fusionadas anchas, mayor longitud en la fila).
  */
+function detectProjectNameFromQaColumn(
+  structuredFiles: ExcelStructuredData[]
+): ProjectNameCandidate | null {
+  if (!isQaColumnWorkbook(structuredFiles)) return null;
+
+  const extracted = extractFromQaColumn(structuredFiles, {
+    title: "Nombre del proyecto",
+    description: "Nombre del emprendimiento o proyecto",
+  });
+  if (!extracted?.content || extracted.confidence < 0.7) return null;
+
+  return {
+    text: extracted.content,
+    score: 95 + extracted.confidence * 10,
+    method: "labeled_prefix",
+  };
+}
+
 export function detectProjectNameFromExcel(
   structuredFiles: ExcelStructuredData[]
 ): ProjectNameCandidate | null {
+  const fromQa = detectProjectNameFromQaColumn(structuredFiles);
+  if (fromQa) return fromQa;
+
   let best: ProjectNameCandidate | null = null;
 
   for (const file of structuredFiles) {

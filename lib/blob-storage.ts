@@ -1,11 +1,26 @@
 import "server-only";
 
-/** True when Vercel Blob storage should be used for persistent files. */
-export function useBlobStorage(): boolean {
+/** Credenciales para operaciones servidor (list, head, put) con @vercel/blob. */
+export function hasBlobServerAuth(): boolean {
   return !!(
     process.env.BLOB_READ_WRITE_TOKEN?.trim() ||
-    process.env.BLOB_STORE_ID?.trim()
+    (process.env.BLOB_STORE_ID?.trim() && process.env.VERCEL_OIDC_TOKEN?.trim())
   );
+}
+
+/** True cuando hay almacenamiento Blob usable desde el servidor. */
+export function useBlobStorage(): boolean {
+  return hasBlobServerAuth();
+}
+
+/** Lanza si Blob no está configurado (knowledge, rúbrica, índice RAG). */
+export function assertBlobStorageConfigured(): void {
+  if (!useBlobStorage()) {
+    throw new Error(
+      "Almacenamiento Blob no configurado en el servidor. Añade BLOB_READ_WRITE_TOKEN en .env.local, " +
+        "o ejecuta `npx vercel env pull .env.local` para obtener VERCEL_OIDC_TOKEN + BLOB_STORE_ID (ver docs/DEPLOY.md)."
+    );
+  }
 }
 
 /** Subida directa desde el navegador con token clásico (BLOB_READ_WRITE_TOKEN). */

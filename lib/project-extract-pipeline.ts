@@ -7,6 +7,7 @@ import { extractTextWithVision } from "@/lib/extract-with-vision";
 import type { ElementDef } from "@/lib/excel-heuristics";
 import { ingestProjectFiles } from "@/lib/project-ingest";
 import { extractElementHybrid } from "@/lib/project-extract-hybrid";
+import { getEvaluationTypeSettings } from "@/lib/evaluation-type-settings-server";
 import {
   buildDuplicateRetryHint,
   findDuplicateContentGroups,
@@ -106,6 +107,11 @@ export async function* runExtractPipeline(
   }
 
   const configElements = await loadConfigElements(evaluationTypeId);
+  const extractConfig =
+    evaluationTypeId != null
+      ? (await getEvaluationTypeSettings(evaluationTypeId)).extract
+      : undefined;
+  const elementTimeoutMs = extractConfig?.elementTimeoutMs ?? ELEMENT_TIMEOUT_MS;
 
   const canSkipIndex = skipReindex !== false && projectIndexMatches(sessionId, projectFilePaths);
   if (canSkipIndex) {
@@ -159,7 +165,8 @@ export async function* runExtractPipeline(
     yield { type: "step", message: `Buscando en proyecto: ${element.title}…` };
 
     const { content, method } = await extractElementHybrid(sessionId, element, {
-      timeoutMs: ELEMENT_TIMEOUT_MS,
+      timeoutMs: elementTimeoutMs,
+      extractConfig,
     });
 
     elementsTable.push({
@@ -191,9 +198,10 @@ export async function* runExtractPipeline(
         yield { type: "step", message: `Revisando duplicado: ${title}…` };
 
         const { content, method } = await extractElementHybrid(sessionId, def, {
-          timeoutMs: ELEMENT_TIMEOUT_MS,
+          timeoutMs: elementTimeoutMs,
           extraHints: hint,
           skipDeterministic: true,
+          extractConfig,
         });
 
         const row = byElement.get(title);
@@ -227,9 +235,10 @@ export async function* runExtractPipeline(
         continuityRow.content
       );
       const { content, method } = await extractElementHybrid(sessionId, innovadorDef, {
-        timeoutMs: ELEMENT_TIMEOUT_MS,
+        timeoutMs: elementTimeoutMs,
         extraHints: hint,
         skipDeterministic: false,
+        extractConfig,
       });
       innovadorRow.content = content;
       yield { type: "element", name: innovadorDef.title, method: `${method}:continuity_fix` };
@@ -273,8 +282,11 @@ export async function retryExtractElement(input: {
     await ingestProjectFiles(input.sessionId, input.projectFilePaths);
   }
 
+  const extractConfig = (await getEvaluationTypeSettings(input.evaluationTypeId)).extract;
+
   const { content, method } = await extractElementHybrid(input.sessionId, element, {
-    timeoutMs: ELEMENT_TIMEOUT_MS,
+    timeoutMs: extractConfig.elementTimeoutMs,
+    extractConfig,
   });
 
   const validated = markIncompleteRows(

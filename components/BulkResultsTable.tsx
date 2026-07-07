@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
+import { formatIndicatorScore, type RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
 import type { BulkProjectRow, BulkProjectStatus } from "@/hooks/useBulkEvaluation";
 
 const CELL_BORDER = "border border-border";
@@ -236,7 +236,7 @@ export default function BulkResultsTable({
                     <td
                       className={`${CELL_BORDER} px-2 py-2 text-center align-top font-semibold text-foreground`}
                     >
-                      {row.overallScore != null ? row.overallScore : ""}
+                      {row.overallScore != null ? formatIndicatorScore(row.overallScore) : ""}
                     </td>
                   </tr>
               ))}

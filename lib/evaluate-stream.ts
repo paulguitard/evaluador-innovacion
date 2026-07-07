@@ -1,5 +1,6 @@
 import type { AgentTraceEntry } from "@/lib/agent-events";
 import type { EvaluateStreamEvent } from "@/lib/evaluate-pipeline";
+import { formatIndicatorScore } from "@/lib/evaluation-scores";
 
 let traceIdCounter = 0;
 function nextTraceId(): string {
@@ -69,7 +70,7 @@ export function applyEvaluateStreamEvent(
         trace.push({
           id: nextTraceId(),
           kind: "step",
-          title: `Indicador general: ${event.overallScore}`,
+          title: `Indicador general: ${formatIndicatorScore(event.overallScore)}`,
           live: false,
         });
       }

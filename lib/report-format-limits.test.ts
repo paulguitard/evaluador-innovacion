@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   parseReportFormatLimits,
   stripCharacterLimitAnnotations,
+  charRange,
 } from "@/lib/report-format-limits";
 
 const SAMPLE_FORMAT = `La estructura del informe debe ser:
@@ -32,6 +33,16 @@ describe("parseReportFormatLimits", () => {
       justification: 500,
       improvements: 500,
     });
+  });
+});
+
+describe("charRange", () => {
+  it("calcula mínimo según ratio configurable (p. ej. pipeline charRangeMinRatio)", () => {
+    const range = charRange(500, 0.9);
+    assert.equal(range.max, 500);
+    assert.equal(range.min, 450);
+    const custom = charRange(1000, 0.85);
+    assert.equal(custom.min, 850);
   });
 });
 

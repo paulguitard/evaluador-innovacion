@@ -8,6 +8,7 @@ import "server-only";
 import {
   getApiKey,
   resolveModelForUseCase,
+  resolveParamsForUseCase,
 } from "@/lib/llm-config-server";
 import type { LlmUseCase } from "@/lib/llm-config-types";
 
@@ -110,8 +111,9 @@ export async function* streamChat(
   options?: OpenRouterCallOptions
 ): AsyncGenerator<string, void, unknown> {
   const useCase = options?.useCase ?? "evaluate";
-  const maxTokens = options?.max_tokens ?? 8192;
-  const temperature = options?.temperature ?? 0.3;
+  const resolved = await resolveParamsForUseCase(useCase);
+  const maxTokens = options?.max_tokens ?? resolved.max_tokens;
+  const temperature = options?.temperature ?? resolved.temperature;
 
   const res = await runWithRetries(
     useCase,
@@ -228,8 +230,9 @@ export async function* streamChatDetailed(
   options?: OpenRouterCallOptions
 ): AsyncGenerator<ChatStreamPart, void, unknown> {
   const useCase = options?.useCase ?? "chat";
-  const maxTokens = options?.max_tokens ?? 8192;
-  const temperature = options?.temperature ?? 0.3;
+  const resolved = await resolveParamsForUseCase(useCase);
+  const maxTokens = options?.max_tokens ?? resolved.max_tokens;
+  const temperature = options?.temperature ?? resolved.temperature;
 
   const res = await runWithRetries(
     useCase,
@@ -302,7 +305,8 @@ export async function chatCompletionVision(
   options?: { max_tokens?: number; model?: string; useCase?: LlmUseCase }
 ): Promise<string> {
   const useCase = options?.useCase ?? "vision";
-  const maxTokens = options?.max_tokens ?? 4096;
+  const resolved = await resolveParamsForUseCase(useCase);
+  const maxTokens = options?.max_tokens ?? resolved.max_tokens;
 
   return runWithRetries(
     useCase,
@@ -335,7 +339,9 @@ export async function chatCompletion(
   options?: { max_tokens?: number; model?: string; temperature?: number; useCase?: LlmUseCase }
 ): Promise<string> {
   const useCase = options?.useCase ?? "extract";
-  const maxTokens = options?.max_tokens ?? 4096;
+  const resolved = await resolveParamsForUseCase(useCase);
+  const maxTokens = options?.max_tokens ?? resolved.max_tokens;
+  const temperature = options?.temperature ?? resolved.temperature;
 
   return runWithRetries(
     useCase,
@@ -348,7 +354,7 @@ export async function chatCompletion(
           messages,
           stream: false,
           max_tokens: maxTokens,
-          temperature: options?.temperature ?? 0.3,
+          temperature,
         }),
       });
       if (!res.ok) {
@@ -405,8 +411,9 @@ export async function chatCompletionWithTools(
   options?: { max_tokens?: number; temperature?: number; model?: string; useCase?: LlmUseCase }
 ): Promise<{ content: string | null; toolCalls: ToolCallResult[] }> {
   const useCase = options?.useCase ?? "agent";
-  const maxTokens = options?.max_tokens ?? 2048;
-  const temperature = options?.temperature ?? 0.2;
+  const resolved = await resolveParamsForUseCase(useCase);
+  const maxTokens = options?.max_tokens ?? resolved.max_tokens;
+  const temperature = options?.temperature ?? resolved.temperature;
 
   return runWithRetries(
     useCase,

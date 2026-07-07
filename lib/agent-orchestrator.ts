@@ -25,6 +25,9 @@ export type ChatAgentInput = {
   /** Resultados de evaluación masiva (informes y notas) para preguntas post-evaluación. */
   bulkEvaluationContext?: string;
   history: { role: "user" | "assistant"; content: string }[];
+  /** Fragmentos RAG recuperados en el cliente (evita descarga Blob en servidor). */
+  precomputedKnowledgeChunks?: import("@/lib/chunk-types").RetrievedChunk[];
+  clientRagEnabled?: boolean;
 };
 
 const MAX_ITER_B = 4;
@@ -158,7 +161,6 @@ async function* runToolLoop(
 export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatStreamEvent> {
   const config = await getConfig(input.evaluationTypeId);
   const hasRubric = !!((config?.rubric_prompt ?? "").trim());
-  const hasInstructions = !!((config?.instructions ?? "").trim() || (config?.prompt ?? "").trim());
   const hasBulkEvalData = !!(input.bulkEvaluationContext?.trim());
   const hasProjectData = !!(
     input.projectElementsTable?.length ||
@@ -179,9 +181,26 @@ export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatS
     message: input.message,
     hasProjectData,
     hasRubric,
-    hasInstructions,
     hasKnowledge,
   });
+
+  const artifacts = createEmptyArtifacts();
+  if (input.precomputedKnowledgeChunks?.length) {
+    artifacts.knowledgeChunks = input.precomputedKnowledgeChunks;
+  }
+
+  if (
+    input.clientRagEnabled &&
+    artifacts.knowledgeChunks.length > 0 &&
+    plan.intent === "knowledge"
+  ) {
+    plan = {
+      ...plan,
+      useToolLoop: false,
+      agentLevel: "A",
+      toolsHint: plan.toolsHint.filter((t) => t !== "search_knowledge"),
+    };
+  }
 
   const hasEmptyElements = (input.projectElementsTable ?? []).some((r) => !r.content.trim());
   const wantsReextract =
@@ -219,7 +238,6 @@ export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatS
     label: plan.intentLabel,
   };
 
-  const artifacts = createEmptyArtifacts();
   const initialElementsKey = JSON.stringify(input.projectElementsTable ?? []);
 
   if (plan.useToolLoop && (plan.agentLevel === "B" || plan.agentLevel === "C")) {

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   backfillSubdimensionScores,
   buildDeterministicEvaluationSummary,
+  buildDeterministicLevelsEvaluationSummary,
   buildRubricScoreSchema,
   computeWeightedIndicatorScore,
   finalizeEvaluationSummary,
@@ -11,6 +12,8 @@ import {
   isProjectDescriptionSummary,
   listSubdimensionSections,
   parseSubdimensionScore,
+  repairFormattedReportFromRaw,
+  shouldRepairFormattedReport,
   parseSubdimensionWeight,
   subdimensionScoreKey,
   subdimensionNamesMatch,
@@ -133,6 +136,16 @@ describe("finalizeEvaluationSummary", () => {
     assert.ok(/Evaluación IGIP/i.test(result));
   });
 
+  it("usa indicatorLabel configurable", () => {
+    const schema = buildRubricScoreSchema(SAMPLE_RUBRIC);
+    const scores: Record<string, number | null> = {};
+    for (const e of schema) scores[e.key] = 2;
+    const bad = "**1. Resumen del proyecto** El proyecto X…";
+    const result = finalizeEvaluationSummary(bad, schema, scores, 2, "TRL");
+    assert.ok(/Evaluación TRL/i.test(result));
+    assert.ok(!/Evaluación IGIP/i.test(result));
+  });
+
   it("acepta síntesis evaluativa válida del LLM", () => {
     const schema = buildRubricScoreSchema(SAMPLE_RUBRIC);
     const scores: Record<string, number | null> = {};
@@ -154,6 +167,27 @@ describe("buildDeterministicEvaluationSummary", () => {
     assert.ok(/Evaluación IGIP/i.test(text));
     assert.ok(/Fortalezas/i.test(text));
     assert.ok(/Debilidades/i.test(text));
+  });
+});
+
+describe("buildDeterministicLevelsEvaluationSummary", () => {
+  it("resume nivel y justificación para IMET", () => {
+    const raw = `**Análisis** Evidencia del prototipo.
+
+Nivel: 3
+
+**Justificación** El proyecto cumple criterios de nivel 3 por contar con plataforma funcional lista para validación.`;
+    const text = buildDeterministicLevelsEvaluationSummary(
+      3,
+      "Prototipo funcional",
+      "IMET",
+      raw,
+      1000
+    );
+    assert.match(text, /nivel 3/i);
+    assert.match(text, /Prototipo funcional/i);
+    assert.match(text, /justificaci/i);
+    assert.doesNotMatch(text, /subdimensi/i);
   });
 });
 
@@ -201,11 +235,12 @@ describe("computeWeightedIndicatorScore", () => {
 });
 
 describe("formatIndicatorScore", () => {
-  it("muestra hasta 2 decimales sin ceros finales", () => {
+  it("muestra siempre 2 decimales", () => {
     assert.equal(formatIndicatorScore(2.95), "2.95");
-    assert.equal(formatIndicatorScore(3), "3");
+    assert.equal(formatIndicatorScore(3), "3.00");
     assert.equal(formatIndicatorScore(2.83), "2.83");
-    assert.equal(formatIndicatorScore(2.7), "2.7");
+    assert.equal(formatIndicatorScore(2.7), "2.70");
+    assert.equal(formatIndicatorScore(2.6), "2.60");
   });
 });
 
@@ -230,7 +265,210 @@ Contribución Social, Ambiental o Productivo: 2
     const fixed = injectAuthoritativeScoresSection(llmReport, schema, scores, overall);
     assert.ok(!fixed.includes("2.7"));
     assert.match(fixed, /\*\*Índice IGIP\*\*: 2\.83/);
-    assert.doesNotMatch(fixed, /Índice IGIP.*\n.*Índice IGIP/s);
+    assert.doesNotMatch(fixed, /Índice IGIP[\s\S]*Índice IGIP/);
+    assert.match(fixed, /ponderación 25%/);
+  });
+
+  it("reemplaza sección «Notas e índice» del formateo §6", () => {
+    const schema = buildRubricScoreSchema(SAMPLE_RUBRIC);
+    const scores: Record<string, number | null> = {};
+    for (const entry of schema) scores[entry.key] = 3;
+    const overall = computeWeightedIndicatorScore(schema, scores);
+    const llmReport = `**Síntesis final**
+
+Texto de síntesis.
+
+**Notas e índice**
+
+Grado de Originalidad de la Idea: 3 (ponderación 0.15)
+Estado del arte: 3 (ponderación 0.10)
+
+Índice final ponderado: 2.55 (sobre 5)`;
+
+    const fixed = injectAuthoritativeScoresSection(llmReport, schema, scores, overall);
+    assert.doesNotMatch(fixed, /ponderación 0\.15/);
+    assert.doesNotMatch(fixed, /2\.55/);
+    assert.match(fixed, /\*\*Notas e índice\*\*/);
+    assert.match(fixed, /\*\*Índice IGIP\*\*: 3\.00/);
+    assert.doesNotMatch(fixed, /Notas e índice[\s\S]*Notas e índice/);
+  });
+
+  it("no corta el informe si «Notas e índice» aparece antes del cierre", () => {
+    const schema = buildRubricScoreSchema(SAMPLE_RUBRIC);
+    const scores: Record<string, number | null> = {};
+    for (const entry of schema) scores[entry.key] = 3;
+    const overall = computeWeightedIndicatorScore(schema, scores);
+    const llmReport = `## Estado del arte
+Análisis parcial sin nota.
+
+**Notas e índice**
+borrador incorrecto
+
+## Contribución Social, Ambiental o Productivo
+**Nota: 3**`;
+
+    const fixed = injectAuthoritativeScoresSection(llmReport, schema, scores, overall);
+    assert.match(fixed, /Contribución Social/);
+    assert.match(fixed, /\*\*Índice IGIP\*\*: 3\.00/);
+  });
+
+  it("usa indicatorLabel personalizado en la sección de notas", () => {
+    const schema = buildRubricScoreSchema(SAMPLE_RUBRIC);
+    const scores: Record<string, number | null> = {};
+    for (const entry of schema) scores[entry.key] = 3;
+    const overall = 3;
+    const report = `**Notas por subdimensión e índice TRL**\n\n**Índice TRL**: 2.5`;
+    const fixed = injectAuthoritativeScoresSection(report, schema, scores, overall, "TRL");
+    assert.match(fixed, /\*\*Índice TRL\*\*: 3\.00/);
+  });
+});
+
+describe("shouldRepairFormattedReport", () => {
+  const dimensions = [
+    {
+      name: "Novedad",
+      subdimensions: [
+        { name: "Grado de Originalidad de la Idea" },
+        { name: "Estado del arte" },
+      ],
+    },
+  ];
+
+  it("no repara si la mayoría de subdimensiones están completas", () => {
+    const formatted = `## Grado de Originalidad de la Idea
+Nota: 3
+
+## Estado del arte
+Nota: 2`;
+
+    assert.equal(shouldRepairFormattedReport(formatted, dimensions), false);
+  });
+
+  it("no repara si subdimensiones usan encabezados numerados", () => {
+    const formatted = `1. Resumen del proyecto
+texto
+
+2. Dimensión: Novedad
+resumen macro
+
+3. Grado de Originalidad de la Idea
+Análisis completo.
+Nota: 3
+
+4. Estado del arte
+Análisis.
+Nota: 2`;
+
+    assert.equal(shouldRepairFormattedReport(formatted, dimensions), false);
+  });
+
+  it("repara si ninguna subdimensión tiene nota", () => {
+    assert.equal(shouldRepairFormattedReport("## Resumen\nsolo texto", dimensions), true);
+  });
+});
+
+describe("repairFormattedReportFromRaw", () => {
+  it("recupera subdimensiones truncadas desde el análisis crudo", () => {
+    const formatted = `## Resumen
+texto
+
+## Grado de Originalidad de la Idea
+**Análisis**
+Completo.
+**Nota: 3**
+
+## Estado del arte
+**Análisis**
+Incompleto y no se`;
+
+    const raw = `### Subdimensión: Grado de Originalidad de la Idea
+
+**Análisis**
+Completo.
+**Nota: 3**
+
+### Subdimensión: Estado del arte
+
+**Análisis**
+Completo estado del arte.
+**Nota: 2**
+
+### Subdimensión: Contribución Social, Ambiental o Productivo
+
+**Análisis**
+Impacto social.
+**Nota: 3**`;
+
+    const repaired = repairFormattedReportFromRaw(formatted, raw, [
+      {
+        name: "Novedad",
+        subdimensions: [
+          { name: "Grado de Originalidad de la Idea" },
+          { name: "Estado del arte" },
+        ],
+      },
+      {
+        name: "Potencial de impacto",
+        subdimensions: [{ name: "Contribución Social, Ambiental o Productivo" }],
+      },
+    ]);
+
+    assert.match(repaired, /Completo estado del arte/);
+    assert.match(repaired, /Impacto social/);
+    assert.match(repaired, /\*\*Nota: 2\*\*/);
+  });
+
+  it("no duplica subdimensiones ya formateadas con encabezados en negrita", () => {
+    const formatted = `**Resumen del proyecto**
+Resumen breve.
+
+**Dimensión: Novedad**
+Síntesis de dimensión.
+
+**Grado de Originalidad de la Idea**
+**Análisis**
+Análisis formateado corto.
+**Justificación**
+Justificación formateada.
+**Sugerencias de mejora**
+1. Mejora A
+**Nota**
+Nota: 3
+
+**Estado del arte**
+**Análisis**
+Análisis estado del arte.
+**Nota**
+Nota: 2
+
+**Síntesis final**
+Cierre evaluativo.`;
+
+    const raw = `### Subdimensión: Grado de Originalidad de la Idea
+
+**Análisis**
+Análisis crudo muy largo ${"x".repeat(500)}
+**Nota: 3**
+
+### Subdimensión: Estado del arte
+
+**Análisis**
+Análisis crudo estado ${"y".repeat(500)}
+**Nota: 2**`;
+
+    const repaired = repairFormattedReportFromRaw(formatted, raw, [
+      {
+        name: "Novedad",
+        subdimensions: [
+          { name: "Grado de Originalidad de la Idea" },
+          { name: "Estado del arte" },
+        ],
+      },
+    ]);
+
+    assert.equal((repaired.match(/Grado de Originalidad de la Idea/g) ?? []).length, 1);
+    assert.doesNotMatch(repaired, /Análisis crudo muy largo/);
+    assert.match(repaired, /Análisis formateado corto/);
   });
 });
 

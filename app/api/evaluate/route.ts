@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
-import { getConfig } from "@/lib/db";
+import { getConfig, getEvaluationTypeById } from "@/lib/db";
 import { runEvaluatePipeline } from "@/lib/evaluate-pipeline";
+import { runEvaluateLevelsPipeline } from "@/lib/evaluate-levels-pipeline";
 import { assertLlmModelsConfigured } from "@/lib/llm-config-server";
+import { isRubricConfigValid, mergeRubricConfig } from "@/lib/rubric-config";
+import { mergeReportFormatConfig, isReportFormatValid } from "@/lib/report-format-config";
+import type { RetrievedChunk } from "@/lib/chunk-types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -31,37 +35,55 @@ export async function POST(request: Request) {
     }
 
     const config = await getConfig(evaluationTypeId);
-    const hasRubric = !!((config?.rubric_prompt ?? "").trim());
-    if (!config || !hasRubric) {
+    const type = await getEvaluationTypeById(evaluationTypeId);
+    if (!config || !type) {
+      return NextResponse.json({ error: "Config not found" }, { status: 404 });
+    }
+
+    const rubric = mergeRubricConfig(JSON.parse(config.rubric_config || "{}"), type.name);
+    const reportFormat = mergeReportFormatConfig(
+      JSON.parse(config.report_format_config || "{}"),
+      rubric
+    );
+
+    if (!isRubricConfigValid(rubric)) {
       return NextResponse.json(
         {
           error: "no_rubric",
-          message: "No hay rúbrica configurada. Configure una rúbrica en Configuración (campo Rúbrica) antes de evaluar.",
+          message: "No hay rúbrica configurada. Configure la rúbrica en §4 antes de evaluar.",
         },
         { status: 400 }
       );
     }
 
-    const reportFormat = (config.report_format ?? "").trim();
-    if (!reportFormat) {
+    if (!isReportFormatValid(reportFormat, rubric)) {
       return NextResponse.json(
         {
           error: "no_report_format",
-          message: "No hay formato de informe configurado. Configure el campo 'Formato de informe' en Configuración.",
+          message: "Formato de informe incompleto. Revise la estructura en §6.",
         },
         { status: 400 }
       );
     }
+
+
+    const precomputedSubdimensionChunks =
+      body?.precomputedSubdimensionChunks &&
+      typeof body.precomputedSubdimensionChunks === "object" &&
+      !Array.isArray(body.precomputedSubdimensionChunks)
+        ? (body.precomputedSubdimensionChunks as Record<string, RetrievedChunk[]>)
+        : undefined;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
         try {
-          for await (const event of runEvaluatePipeline(
-            evaluationTypeId,
-            projectElementsTable,
-            reportFormat
-          )) {
+          for await (const event of
+            rubric.type === "niveles"
+              ? runEvaluateLevelsPipeline(evaluationTypeId, projectElementsTable)
+              : runEvaluatePipeline(evaluationTypeId, projectElementsTable, {
+                  precomputedSubdimensionChunks,
+                })) {
             controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
           }
         } catch (err) {

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   parseRubricDimensions,
   parseRubricSubdimensions,
+  summarizeProjectForEvaluationFocus,
 } from "@/lib/rubric-dimensions";
 
 const NOVEDAD_BLOCK = `Subdimensión "Grado de Originalidad de la Idea"
@@ -37,5 +38,24 @@ Subdimensión "Contribución Social, Ambiental o Productivo"
     assert.ok(novedad);
     const novedadSubs = parseRubricSubdimensions(novedad!.content);
     assert.equal(novedadSubs.length, 2);
+  });
+});
+
+describe("summarizeProjectForEvaluationFocus", () => {
+  const table = [
+    { element: "Nombre del proyecto", content: "Proyecto solar comunal" },
+    { element: "Escalabilidad", content: "Planes de replicar en otras comunas del país." },
+    { element: "Factor innovador", content: "Uso de paneles bifaciales de última generación." },
+  ];
+
+  it("prioriza elementos alineados con la subdimensión evaluada", () => {
+    const excerpt = summarizeProjectForEvaluationFocus(table, {
+      name: "Potencial de expansión",
+      dimensionName: "Escalabilidad",
+      rubricContent: "Nota 1: sin planes de expansión. Nota 4: expansión nacional comprobada.",
+    });
+    assert.match(excerpt, /Escalabilidad/i);
+    assert.match(excerpt, /replicar/i);
+    assert.doesNotMatch(excerpt, /bifaciales/i);
   });
 });

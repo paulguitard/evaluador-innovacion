@@ -1,3 +1,5 @@
+import { fuzzyMatchScore, normalizeForMatch } from "@/lib/text-match";
+
 export type RubricDimension = {
   name: string;
   content: string;
@@ -56,7 +58,10 @@ function findDimensionHeaders(text: string): DimensionHeader[] {
  * Extrae dimensiones de evaluación desde el texto de la rúbrica.
  * Soporta encabezados IGIP (Dimensión Novedad:, ## Novedad, etc.).
  */
-export function parseRubricDimensions(rubricText: string): RubricDimension[] {
+export function parseRubricDimensions(
+  rubricText: string,
+  extraDimensionLabels: string[] = []
+): RubricDimension[] {
   const text = rubricText.trim();
   if (!text) return [];
 
@@ -85,6 +90,7 @@ export function parseRubricDimensions(rubricText: string): RubricDimension[] {
     "Escalabilidad",
     "Resultado final",
     "Resultado Final",
+    ...extraDimensionLabels.filter((l) => l.trim()),
   ];
 
   for (const name of legacyNames) {
@@ -179,7 +185,78 @@ export function parseRubricSubdimensions(dimensionContent: string): RubricSubdim
   return subdims;
 }
 
-/** Resumen corto del proyecto para queries RAG en evaluación. */
+function relevanceTermsForFocus(
+  focusName: string,
+  dimensionName: string,
+  rubricContent: string
+): string[] {
+  const terms = new Set<string>();
+  const addFrom = (text: string) => {
+    for (const w of normalizeForMatch(text).split(" ")) {
+      if (w.length >= 4) terms.add(w);
+    }
+  };
+  addFrom(focusName);
+  addFrom(dimensionName);
+  addFrom(rubricContent.slice(0, 500));
+  return [...terms];
+}
+
+function scoreProjectRowRelevance(
+  row: { element: string; content: string },
+  focusName: string,
+  dimensionName: string,
+  terms: string[]
+): number {
+  const blob = normalizeForMatch(`${row.element} ${row.content}`);
+  let score = fuzzyMatchScore(row.element, focusName) * 40;
+  score += fuzzyMatchScore(row.element, dimensionName) * 15;
+  score += fuzzyMatchScore(blob, focusName) * 25;
+  for (const t of terms) {
+    if (blob.includes(t)) score += t.length >= 7 ? 4 : 2;
+  }
+  return score;
+}
+
+function formatProjectRows(
+  rows: { element: string; content: string }[],
+  maxChars: number
+): string {
+  const text = rows.map((r) => `${r.element}: ${r.content}`).join("\n");
+  return text.length > maxChars ? text.slice(0, maxChars) + "…" : text;
+}
+
+/**
+ * Fragmento del proyecto extraído relevante al foco de evaluación (dimensión o subdimensión).
+ * Prioriza elementos cuyo título/contenido coincide con el criterio evaluado.
+ */
+export function summarizeProjectForEvaluationFocus(
+  table: { element: string; content: string }[],
+  focus: { name: string; dimensionName: string; rubricContent: string },
+  maxChars = 1200,
+  topN = 8
+): string {
+  if (table.length === 0) return "";
+
+  const terms = relevanceTermsForFocus(focus.name, focus.dimensionName, focus.rubricContent);
+  const scored = table
+    .map((row) => ({
+      row,
+      score: scoreProjectRowRelevance(row, focus.name, focus.dimensionName, terms),
+    }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (scored.length === 0) {
+    return summarizeProjectForRag(table, maxChars);
+  }
+
+  const limit = Math.max(1, Math.min(50, topN));
+  const top = scored.slice(0, Math.min(limit, scored.length)).map((x) => x.row);
+  return formatProjectRows(top, maxChars);
+}
+
+/** Resumen corto del proyecto para queries RAG en evaluación (fallback genérico). */
 export function summarizeProjectForRag(
   table: { element: string; content: string }[],
   maxChars = 2000

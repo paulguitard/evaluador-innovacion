@@ -14,13 +14,13 @@ import {
   parseNdjsonLine,
 } from "@/lib/chat-stream";
 import {
-  applyEvaluateStreamEvent,
-  createEvaluateStreamState,
   formatEvaluateCompletionMessage,
-  parseEvaluateNdjsonLine,
 } from "@/lib/evaluate-stream";
+import { runEvaluateStream } from "@/lib/run-evaluate-stream";
+import { retrieveKnowledgeForChat } from "@/lib/chat-client-rag";
+import { isLikelyKnowledgeChatMessage } from "@/lib/chat-intent-client";
+import { fetchBulkEvaluationConfig } from "@/lib/bulk-evaluation-config-client";
 import { createStaggeredTraceReveal } from "@/lib/trace-reveal";
-import type { EvaluateStreamEvent } from "@/lib/evaluate-pipeline";
 import { stripCharacterLimitAnnotations } from "@/lib/report-format-limits";
 import type { EvaluationMode } from "@/lib/evaluation-mode";
 import { countBulkIgnoredFiles, filterBulkProjectFiles } from "@/lib/evaluation-mode";
@@ -165,6 +165,18 @@ export default function ChatPanel({
           ? buildBulkEvaluationChatContext(bulkRows, bulkScoreSchema)
           : undefined;
 
+      let precomputedKnowledgeChunks;
+      let clientRagEnabled = false;
+      try {
+        const bulkCfg = await fetchBulkEvaluationConfig();
+        if (bulkCfg.useClientKnowledgeIndex && isLikelyKnowledgeChatMessage(text)) {
+          clientRagEnabled = true;
+          precomputedKnowledgeChunks = await retrieveKnowledgeForChat(activeTypeId, text);
+        }
+      } catch {
+        /* fallback servidor */
+      }
+
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -179,6 +191,8 @@ export default function ChatPanel({
               ? projectStructuredData
               : undefined,
           bulkEvaluationContext,
+          precomputedKnowledgeChunks,
+          clientRagEnabled,
           messages: messages.slice(0, -1),
         }),
         signal: controller.signal,
@@ -349,86 +363,23 @@ export default function ChatPanel({
       evaluateTraceMsgIndexRef.current = -1;
     };
 
-    const processEvaluateEvent = (
-      event: EvaluateStreamEvent,
-      streamState: ReturnType<typeof createEvaluateStreamState>,
-      live: boolean
-    ) => {
-      if (event.type === "error") throw new Error(event.error);
-      const nextState = applyEvaluateStreamEvent(streamState, event, live);
-      const trace = nextState.trace.map((t) => ({ ...t, live: live && t.live }));
-      evaluateFullTraceRef.current = trace;
-      if (event.type === "done") {
-        evaluateCompletionPendingRef.current = formatEvaluateCompletionMessage();
-      }
-      reveal.setState(trace, "");
-      return nextState;
-    };
-
     try {
-      const res = await fetch("/api/evaluate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          evaluationTypeId: activeTypeId,
-          projectElementsTable: projectElementsTable?.length ? projectElementsTable : undefined,
-        }),
+      const result = await runEvaluateStream({
+        evaluationTypeId: activeTypeId,
+        projectElementsTable: projectElementsTable ?? [],
+        onTraceUpdate: (trace) => {
+          evaluateFullTraceRef.current = trace;
+          reveal.setState(trace, "");
+        },
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        const message = err?.message || err?.error || res.statusText;
-        throw new Error(message);
-      }
-      const reader = res.body?.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let reportContent = "";
-      let streamState = createEvaluateStreamState();
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-          for (const line of lines) {
-            const event = parseEvaluateNdjsonLine(line);
-            if (!event) continue;
-            if (event.type === "content") {
-              reportContent += event.chunk;
-              onReportContentChange(formatReportContent(reportContent));
-              continue;
-            }
-            if (event.type === "report_content") {
-              reportContent = event.content;
-              onReportContentChange(formatReportContent(reportContent));
-              continue;
-            }
-            streamState = processEvaluateEvent(event, streamState, true);
-          }
-        }
-        if (buffer.trim()) {
-          const event = parseEvaluateNdjsonLine(buffer);
-          if (event) {
-            if (event.type === "content") {
-              reportContent += event.chunk;
-              onReportContentChange(formatReportContent(reportContent));
-            } else if (event.type === "report_content") {
-              reportContent = event.content;
-              onReportContentChange(formatReportContent(reportContent));
-            } else {
-              streamState = processEvaluateEvent(event, streamState, false);
-            }
-          }
-        }
-        if (!evaluateCompletionPendingRef.current) {
-          evaluateCompletionPendingRef.current = formatEvaluateCompletionMessage();
-          streamState = applyEvaluateStreamEvent(streamState, { type: "done" }, false);
-          evaluateFullTraceRef.current = streamState.trace;
-          reveal.setState(streamState.trace, "");
-        }
+      evaluateCompletionPendingRef.current = formatEvaluateCompletionMessage();
+      evaluateFullTraceRef.current = result.trace;
+      reveal.setState(result.trace, "");
+      if (result.reportContent) {
+        onReportContentChange(result.reportContent);
       }
+      appendEvaluateCompletion();
     } catch (e) {
       evaluateCompletionPendingRef.current = null;
       evaluateRevealRef.current?.flushAll();
@@ -742,7 +693,7 @@ export default function ChatPanel({
             bulkRunning ||
             (evaluationMode === "bulk" && bulkFiles.length === 0)
           }
-          className="rounded-full bg-[#4b5563] px-4 py-2 text-sm font-medium text-white hover:bg-[#374151] focus:outline-none focus:ring-2 focus:ring-gray-500 dark:bg-[#6b7280] dark:hover:bg-[#4b5563] disabled:opacity-50"
+          className="rounded-full bg-btn-primary-bg px-4 py-2 text-sm font-medium text-btn-primary-fg hover:bg-btn-primary-hover focus:outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-50"
         >
           {bulkRunning ? "Evaluando…" : "Evaluar"}
         </button>
@@ -751,7 +702,7 @@ export default function ChatPanel({
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={!activeTypeId || uploading || bulkRunning}
-            className="rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 dark:border-gray-600 dark:bg-[#374151] dark:text-gray-200 dark:hover:bg-[#4b5563] disabled:opacity-50"
+            className="rounded-full border border-btn-secondary-border bg-btn-secondary-bg px-4 py-2 text-sm font-medium text-btn-secondary-fg hover:bg-btn-secondary-hover focus:outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-50"
           >
             {uploading ? "Subiendo…" : "Subir archivos"}
           </button>
@@ -760,7 +711,7 @@ export default function ChatPanel({
             type="button"
             onClick={() => folderInputRef.current?.click()}
             disabled={!activeTypeId || bulkRunning}
-            className="rounded-full border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-500 dark:border-gray-600 dark:bg-[#374151] dark:text-gray-200 dark:hover:bg-[#4b5563] disabled:opacity-50"
+            className="rounded-full border border-btn-secondary-border bg-btn-secondary-bg px-4 py-2 text-sm font-medium text-btn-secondary-fg hover:bg-btn-secondary-hover focus:outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-50"
           >
             Elegir carpeta
           </button>

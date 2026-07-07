@@ -1,3 +1,4 @@
+import type { EvaluateStreamEvent } from "@/lib/evaluate-pipeline";
 import type { AgentTraceEntry } from "@/lib/agent-events";
 import {
   applyEvaluateStreamEvent,
@@ -5,6 +6,13 @@ import {
   parseEvaluateNdjsonLine,
 } from "@/lib/evaluate-stream";
 import { stripCharacterLimitAnnotations } from "@/lib/report-format-limits";
+import { fetchBulkEvaluationConfig } from "@/lib/bulk-evaluation-config-client";
+import { buildPrecomputedChunksForEvaluation } from "@/lib/evaluate-client-rag";
+import {
+  ensureKnowledgeIndex,
+  type KnowledgeIndexProgress,
+} from "@/lib/knowledge-index-cache";
+import type { RetrievedChunk } from "@/lib/chunk-types";
 
 export type EvaluateStreamResult = {
   reportContent: string;
@@ -18,19 +26,55 @@ function formatReportContent(text: string): string {
   return stripCharacterLimitAnnotations(text);
 }
 
+function progressToTrace(message: string): AgentTraceEntry {
+  return {
+    id: `idx-${Date.now()}`,
+    kind: "step",
+    title: message,
+    detail: "",
+    live: false,
+  };
+}
+
 export async function runEvaluateStream(params: {
   evaluationTypeId: number;
   projectElementsTable: { element: string; content: string }[];
   onTraceUpdate?: (trace: AgentTraceEntry[]) => void;
-  onContentUpdate?: (reportContent: string) => void;
+  onIndexProgress?: (progress: KnowledgeIndexProgress) => void;
   signal?: AbortSignal;
+  /** Índice ya cargado (p. ej. lote masivo). */
+  knowledgeChunks?: import("@/lib/chunk-types").StoredChunk[];
 }): Promise<EvaluateStreamResult> {
+  const bulkConfig = await fetchBulkEvaluationConfig();
+  let precomputedSubdimensionChunks: Record<string, RetrievedChunk[]> | undefined;
+
+  if (bulkConfig.useClientKnowledgeIndex) {
+    const chunks =
+      params.knowledgeChunks ??
+      (
+        await ensureKnowledgeIndex(params.evaluationTypeId, (p) => {
+          params.onIndexProgress?.(p);
+          if (p.message) {
+            params.onTraceUpdate?.([progressToTrace(p.message)]);
+          }
+        })
+      ).chunks;
+
+    params.onTraceUpdate?.([progressToTrace("Buscando fragmentos de referencia en índice local…")]);
+    precomputedSubdimensionChunks = await buildPrecomputedChunksForEvaluation({
+      evaluationTypeId: params.evaluationTypeId,
+      projectElementsTable: params.projectElementsTable,
+      chunks,
+    });
+  }
+
   const res = await fetch("/api/evaluate", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       evaluationTypeId: params.evaluationTypeId,
       projectElementsTable: params.projectElementsTable,
+      precomputedSubdimensionChunks,
     }),
     signal: params.signal,
   });
@@ -61,14 +105,8 @@ export async function runEvaluateStream(params: {
       const event = parseEvaluateNdjsonLine(line);
       if (!event) continue;
       if (event.type === "error") throw new Error(event.error);
-      if (event.type === "content") {
-        reportContent += event.chunk;
-        params.onContentUpdate?.(formatReportContent(reportContent));
-        continue;
-      }
       if (event.type === "report_content") {
         reportContent = event.content;
-        params.onContentUpdate?.(formatReportContent(reportContent));
         continue;
       }
       if (event.type === "subdimension_score") {
@@ -96,13 +134,8 @@ export async function runEvaluateStream(params: {
     const event = parseEvaluateNdjsonLine(buffer);
     if (event) {
       if (event.type === "error") throw new Error(event.error);
-      if (event.type === "content") {
-        reportContent += event.chunk;
-        params.onContentUpdate?.(formatReportContent(reportContent));
-      }
       if (event.type === "report_content") {
         reportContent = event.content;
-        params.onContentUpdate?.(formatReportContent(reportContent));
       }
       if (event.type === "scores_summary") {
         subdimensionScores = { ...event.subdimensionScores };
@@ -111,7 +144,7 @@ export async function runEvaluateStream(params: {
       if (event.type === "evaluation_summary") {
         evaluationSummary = event.text;
       }
-      if (event.type !== "content") {
+      if (event.type !== "report_content") {
         streamState = applyEvaluateStreamEvent(streamState, event, false);
       }
     }
@@ -125,3 +158,5 @@ export async function runEvaluateStream(params: {
     trace: streamState.trace.map((t) => ({ ...t, live: false })),
   };
 }
+
+export type { EvaluateStreamEvent };

@@ -14,14 +14,19 @@ import {
   buildMultiChapterComparisonContext,
 } from "@/lib/chapter-lookup";
 import {
-  CONTEXT_LIMITS,
-  RAG_QUERY_PROMPT_CHARS,
-  RAG_QUERY_RUBRIC_CHARS,
+  getContextLimits,
+  getRagQueryLimits,
+  applyEvaluateRagOverrides,
   type ContextMode,
 } from "@/lib/rag-limits";
+import { getEvaluationTypeSettings } from "@/lib/evaluation-type-settings-server";
+import { getEvaluationConfig } from "@/lib/evaluation-config-server";
+import { loadChatAgentConfig } from "@/lib/chat-agent-config-server";
 import { summarizeChunks, type BuildContextStreamEvent } from "@/lib/agent-events";
 import { includesSource, type ContextPlan } from "@/lib/context-plan";
 import type { AgentArtifacts } from "@/lib/agent-tools";
+import { mergeRubricConfig, compileRubricToLegacyText } from "@/lib/rubric-config";
+import { isReportFormatValid, mergeReportFormatConfig, compileReportFormatToLegacyText } from "@/lib/report-format-config";
 import path from "path";
 import fs from "fs";
 
@@ -97,14 +102,15 @@ export type BuildSystemContextOptions = {
 };
 
 function buildDefaultRagQuery(
-  promptForInstructions: string,
+  knowledgeLabel: string,
   rubricText: string,
+  queryLimits: { ragQueryPromptChars: number; ragQueryRubricChars: number },
   extra?: string
 ): string {
   return [
-    promptForInstructions.slice(0, RAG_QUERY_PROMPT_CHARS),
-    rubricText.slice(0, RAG_QUERY_RUBRIC_CHARS),
-    extra ?? "Evaluar proyecto según rúbrica y documentación de referencia Manual Oslo innovación.",
+    knowledgeLabel.slice(0, queryLimits.ragQueryPromptChars),
+    rubricText.slice(0, queryLimits.ragQueryRubricChars),
+    extra ?? `Evaluar proyecto según rúbrica y documentación de referencia (${knowledgeLabel}).`,
   ]
     .filter(Boolean)
     .join(" ")
@@ -142,6 +148,11 @@ export async function buildSystemContext(
   const config = await getConfig(evaluationTypeId);
   if (!config) return "";
 
+  const typeSettings = await getEvaluationTypeSettings(evaluationTypeId);
+  const evaluationConfig = await getEvaluationConfig(evaluationTypeId);
+  const chatAgentConfig = await loadChatAgentConfig();
+  const queryLimits = getRagQueryLimits(typeSettings.rag);
+
   emitContextEvent(options, {
     type: "step",
     phase: "context",
@@ -149,7 +160,10 @@ export async function buildSystemContext(
   });
 
   const mode: ContextMode = options?.contextMode ?? "chat-project";
-  const limits = CONTEXT_LIMITS[mode];
+  let limits = getContextLimits(mode, typeSettings.rag);
+  if (mode === "evaluate") {
+    limits = applyEvaluateRagOverrides(limits, evaluationConfig.ragEvaluate);
+  }
   const maxSystemChars = limits.maxSystemChars;
   const knowledgeConfigured = await isKnowledgeConfigured(evaluationTypeId);
   const knowledgeIndexReady = knowledgeConfigured && (await hasActiveKnowledgeIndex(evaluationTypeId));
@@ -267,7 +281,7 @@ export async function buildSystemContext(
         "",
         "## Texto del capítulo (fragmentos indexados)",
         "",
-        "REGLA: Sigue el «Formato obligatorio de la respuesta» e incluye todas las secciones del índice con encabezado y párrafo propios. No omitas secciones ni uses solo la etiqueta «resumen anticipado». No uses la rúbrica IGIP. No inventes contenido.",
+        `REGLA: Sigue el «Formato obligatorio de la respuesta» e incluye todas las secciones del índice con encabezado y párrafo propios. No omitas secciones ni uses solo la etiqueta «resumen anticipado». ${chatAgentConfig.contextHardRules.chapterComparisonNoRubric} No inventes contenido.`,
         "",
         formatKnowledgeChunks(chapterCtx.chunks),
       ].join("\n");
@@ -315,7 +329,7 @@ export async function buildSystemContext(
       return [
         `## Contenido de la página ${targetPage} del manual de referencia`,
         "",
-        "REGLA: Responde ÚNICAMENTE describiendo o citando el texto de los fragmentos siguientes. No uses la rúbrica IGIP ni criterios de evaluación del proyecto. No inventes contenido.",
+        chatAgentConfig.contextHardRules.buildContextNoRubric,
         "",
         formatKnowledgeChunks(pageChunks),
       ].join("\n");
@@ -335,11 +349,23 @@ export async function buildSystemContext(
 
   const parts: string[] = [];
 
-  const instructions = (config.instructions ?? "").trim();
-  const promptLegacy = (config.prompt ?? "").trim();
-  const promptForInstructions = instructions || promptLegacy;
-  const reportFormat = (config.report_format ?? "").trim();
-  const rubricText = (config.rubric_prompt ?? "").trim();
+  const knowledgeLabel = evaluationConfig.knowledgeReferenceLabel;
+  let reportFormat = (config.report_format ?? "").trim();
+  let rubricText = (config.rubric_prompt ?? "").trim();
+  try {
+    const rubricConfig = mergeRubricConfig(JSON.parse(config.rubric_config || "{}"));
+    const compiled = compileRubricToLegacyText(rubricConfig).trim();
+    if (compiled) rubricText = compiled;
+    const reportConfig = mergeReportFormatConfig(
+      JSON.parse(config.report_format_config || "{}"),
+      rubricConfig
+    );
+    if (isReportFormatValid(reportConfig, rubricConfig)) {
+      reportFormat = compileReportFormatToLegacyText(reportConfig, rubricConfig);
+    }
+  } catch {
+    /* mantener texto legacy */
+  }
 
   const elementsRaw = config.elements ?? "[]";
   let elementsList: { title?: string; description?: string; section?: string }[] = [];
@@ -371,8 +397,8 @@ export async function buildSystemContext(
 
   const includeFormatInSummary = !options?.excludeReportFormat;
   const configSummary = [
-    "**Instrucciones de evaluación:**",
-    promptForInstructions ? promptForInstructions : "Vacío. No hay instrucciones configuradas para este tipo de evaluación.",
+    "**Metodología de evaluación:**",
+    "Programada en la aplicación: extraer elementos del proyecto → evaluar por dimensión/subdimensión según rúbrica → fundamentar con Knowledge → generar informe según formato configurado.",
     "",
     ...(includeFormatInSummary
       ? ["**Formato del informe:**", reportFormat ? reportFormat : "Vacío. No hay formato de informe configurado.", ""]
@@ -383,7 +409,9 @@ export async function buildSystemContext(
     "**Elementos a identificar en el proyecto** (lo que se extrae y se muestra en 'Proyecto extraído'):",
     elementsConfigText,
     "",
-    "REGLA: Si el usuario pregunta por las instrucciones, el formato del informe o los elementos a identificar, responde ÚNICAMENTE con lo indicado en esta sección. No confundas instrucciones con rúbrica. No inventes pasos, secciones (A,B,C,D), subdimensiones ni criterios a partir del manual de referencia.",
+    `**Parámetros de evaluación (§5):** índice ${evaluationConfig.indicatorLabel}, knowledge «${knowledgeLabel}».`,
+    "",
+    "REGLA: Si el usuario pregunta por la configuración, el formato del informe o los elementos a identificar, responde ÚNICAMENTE con lo indicado en esta sección. No confundas rúbrica con formato. No inventes pasos ni criterios a partir del manual de referencia.",
   ].join("\n");
 
   const plan = options?.contextPlan;
@@ -393,7 +421,7 @@ export async function buildSystemContext(
     emitContextEvent(options, {
       type: "context_section",
       section: "Configuración",
-      detail: "Instrucciones, formato, elementos y estado de la rúbrica",
+      detail: "Configuración, formato, elementos y estado de la rúbrica",
     });
   } else {
     emitContextEvent(options, {
@@ -405,16 +433,12 @@ export async function buildSystemContext(
 
   if (options?.evaluateSubdimension) {
     parts.push(
-      `## Enfoque de esta evaluación parcial\n\nEvalúa ÚNICAMENTE la subdimensión **${options.evaluateSubdimension.name}** (dimensión **${options.evaluateSubdimension.dimensionName}**). Fundamenta el análisis en los fragmentos del Manual de referencia (Knowledge) incluidos abajo y en los datos del proyecto.\n\n### Criterios de esta subdimensión\n\n${options.evaluateSubdimension.content}`
+      `## Enfoque de esta evaluación parcial\n\nEvalúa ÚNICAMENTE la subdimensión **${options.evaluateSubdimension.name}** (dimensión **${options.evaluateSubdimension.dimensionName}**). Fundamenta el análisis en los fragmentos de **${knowledgeLabel}** (Knowledge) incluidos abajo y en los datos del proyecto.\n\n### Criterios de esta subdimensión\n\n${options.evaluateSubdimension.content}`
     );
   } else if (options?.evaluateDimension) {
     parts.push(
-      `## Enfoque de esta evaluación parcial\n\nEvalúa ÚNICAMENTE la dimensión **${options.evaluateDimension.name}**. Fundamenta el análisis en los fragmentos del Manual de referencia (Knowledge) incluidos abajo y en los datos del proyecto.\n\n### Criterios de esta dimensión\n\n${options.evaluateDimension.content}`
+      `## Enfoque de esta evaluación parcial\n\nEvalúa ÚNICAMENTE la dimensión **${options.evaluateDimension.name}**. Fundamenta el análisis en los fragmentos de **${knowledgeLabel}** (Knowledge) incluidos abajo y en los datos del proyecto.\n\n### Criterios de esta dimensión\n\n${options.evaluateDimension.content}`
     );
-  }
-
-  if (promptForInstructions && (!plan || includesSource(plan, "instructions"))) {
-    parts.push("## Instrucciones de evaluación\n\n" + promptForInstructions);
   }
 
   if (
@@ -521,7 +545,7 @@ REGLA para preguntas sobre rúbrica o criterios: Responde únicamente que no hay
     try {
       const ragQuery =
         options?.ragQuery?.trim() ||
-        buildDefaultRagQuery(promptForInstructions, rubricText);
+        buildDefaultRagQuery(knowledgeLabel, rubricText, queryLimits);
       const ragQueries =
         mode === "chat-knowledge" ? buildKnowledgeRagQueries(ragQuery) : undefined;
 

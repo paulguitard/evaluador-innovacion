@@ -128,14 +128,10 @@ export default function Header({
 
                   }}
 
-                  className={`w-full px-4 py-2 text-left text-sm transition-colors focus:outline-none focus:bg-gray-100 dark:focus:bg-[#374151] ${
-
+                  className={`w-full px-4 py-2 text-left text-sm transition-colors focus:outline-none focus:bg-surface-hover ${
                     activeId === t.id
-
-                      ? "bg-gray-100 font-medium text-gray-900 dark:bg-[#374151] dark:text-white"
-
-                      : "text-gray-700 hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-[#374151]"
-
+                      ? "bg-surface-elevated font-medium text-foreground"
+                      : "text-foreground-muted hover:bg-surface-hover hover:text-foreground"
                   }`}
 
                 >
@@ -196,8 +192,7 @@ export default function Header({
 
       </div>
 
-      <div className="flex shrink-0 items-center gap-1">
-
+      <div className="flex shrink-0 items-center gap-2">
         <ThemeSwitcher />
 
         <button

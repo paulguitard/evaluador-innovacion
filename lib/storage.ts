@@ -2,58 +2,13 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-
-/** Serverless (Vercel): sesiones de proyecto en /tmp, no persistentes. */
+/** Sesiones de proyecto y caché temporal en /tmp (no persistente). */
 export function useEphemeralSessions(): boolean {
-  return (
-    !!process.env.VERCEL ||
-    !!process.env.BLOB_READ_WRITE_TOKEN?.trim() ||
-    !!process.env.BLOB_STORE_ID?.trim()
-  );
+  return true;
 }
 
-export function getDataDir(): string {
-  const base = useEphemeralSessions()
-    ? path.join(os.tmpdir(), "evaluador-data")
-    : DATA_DIR;
-  if (!fs.existsSync(base)) {
-    try {
-      fs.mkdirSync(base, { recursive: true });
-    } catch {
-      /* read-only FS en serverless */
-    }
-  }
-  return base;
-}
-
-export function getKnowledgeDir(evaluationTypeId: number): string {
-  const base = useEphemeralSessions()
-    ? path.join(os.tmpdir(), "evaluador-data")
-    : getDataDir();
-  const dir = path.join(base, String(evaluationTypeId), "knowledge");
-  if (!fs.existsSync(dir)) {
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch {
-      /* read-only FS */
-    }
-  }
-  return dir;
-}
-
-export function getRubricPath(evaluationTypeId: number, filename: string): string {
-  const dir = path.join(getDataDir(), String(evaluationTypeId));
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-  return path.join(dir, `rubric_${path.basename(filename)}`);
-}
-
-export function getRubricFilePath(evaluationTypeId: number, rubricPathFromConfig: string): string {
-  if (!rubricPathFromConfig) return "";
-  const dir = path.join(getDataDir(), String(evaluationTypeId));
-  return path.join(dir, path.basename(rubricPathFromConfig));
+function getSessionsBaseDir(): string {
+  return path.join(os.tmpdir(), "evaluador-sessions");
 }
 
 function safeSessionId(sessionId: string): string {
@@ -62,10 +17,7 @@ function safeSessionId(sessionId: string): string {
 
 export function getSessionDir(sessionId: string): string {
   const safe = safeSessionId(sessionId);
-  const base = useEphemeralSessions()
-    ? path.join(os.tmpdir(), "evaluador-sessions")
-    : path.join(getDataDir(), "sessions");
-  const dir = path.join(base, safe);
+  const dir = path.join(getSessionsBaseDir(), safe);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -104,31 +56,6 @@ export function listSessionProjectFilePaths(
       return fs.statSync(fp).isFile() && allowed.has(path.extname(f).toLowerCase());
     })
     .map((f) => path.join(dir, f));
-}
-
-export function listKnowledgeFiles(evaluationTypeId: number): string[] {
-  const dir = getKnowledgeDir(evaluationTypeId);
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((f) => fs.statSync(path.join(dir, f)).isFile());
-}
-
-export function getKnowledgeFilePath(evaluationTypeId: number, filename: string): string {
-  return path.join(getKnowledgeDir(evaluationTypeId), path.basename(filename));
-}
-
-export function getVectorsDir(evaluationTypeId: number): string {
-  const base = useEphemeralSessions()
-    ? path.join(os.tmpdir(), "evaluador-vectors")
-    : getDataDir();
-  const dir = path.join(base, String(evaluationTypeId), "vectors");
-  if (!fs.existsSync(dir)) {
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch {
-      /* read-only FS en serverless: la ruta sirve solo para comprobar si hay caché local */
-    }
-  }
-  return dir;
 }
 
 /** Índice RAG de archivos del proyecto (por sesión, separado del Knowledge). */

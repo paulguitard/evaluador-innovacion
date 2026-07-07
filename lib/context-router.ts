@@ -18,58 +18,22 @@ import {
   configOnlyPlan,
 } from "@/lib/context-plan";
 import type { ContextMode } from "@/lib/rag-limits";
+import { loadChatAgentConfig } from "@/lib/chat-agent-config-server";
+import type { ChatAgentConfig } from "@/lib/chat-agent-config";
 
 export type RouterInput = {
   message: string;
   hasProjectData: boolean;
   hasRubric: boolean;
-  hasInstructions: boolean;
   hasKnowledge: boolean;
 };
-
-const ROUTER_SYSTEM = `Eres un agente planificador de contexto para un evaluador de proyectos de innovación.
-Tu única tarea es analizar la pregunta del usuario y devolver un JSON con el plan de qué fuentes incluir en el system prompt.
-
-Fuentes disponibles (sources):
-- config_summary: resumen de configuración (instrucciones, formato, elementos, estado rúbrica)
-- instructions: instrucciones de evaluación completas
-- report_format: formato del informe
-- rubric: rúbrica y criterios de evaluación
-- project: elementos extraídos del proyecto
-- project_structured: datos Excel estructurados
-- knowledge_rag: fragmentos del manual de referencia (Knowledge / Manual Oslo)
-
-Reglas:
-- Si preguntan por el manual, knowledge, Oslo, innovación teórica, definiciones → sources SOLO knowledge_rag (o knowledge_rag + project si comparan). excludeSources debe incluir rubric, instructions, report_format, config_summary salvo que también pregunten por ellos.
-- Si preguntan por el proyecto (objetivos, presupuesto, sedes…) → project (+ project_structured si hay Excel). excludeSources: rubric, knowledge_rag salvo que también lo pidan.
-- Si preguntan por instrucciones, formato, elementos, rúbrica configurada → config sources. excludeSources: knowledge_rag, project.
-- Si preguntan por la rúbrica Y el manual/Oslo (evaluar la rúbrica según el manual) → sources knowledge_rag + rubric; NO excluir rubric; agentLevel C, useToolLoop true.
-- Si comparan manual Y proyecto O necesitan varias fuentes → complexity "moderate" o "complex", agentLevel "B" o "C", useToolLoop true.
-- Pregunta simple de una sola fuente → agentLevel "A", complexity "simple", useToolLoop false.
-- Comparación, varios pasos, "según el manual y el proyecto" → agentLevel "C", complexity "complex", useToolLoop true.
-- Pregunta que requiere buscar en manual Y leer proyecto pero en un paso → agentLevel "B", complexity "moderate", useToolLoop true.
-
-Responde ÚNICAMENTE con JSON válido (sin markdown):
-{
-  "agentLevel": "A" | "B" | "C",
-  "complexity": "simple" | "moderate" | "complex",
-  "intent": "knowledge" | "project" | "config" | "mixed",
-  "intentLabel": "texto corto en español",
-  "sources": ["..."],
-  "excludeSources": ["..."],
-  "ragMode": "chat-knowledge" | "chat-project" | "chat-config" | "chat-chapter",
-  "ragQuery": "consulta para búsqueda RAG si aplica",
-  "reasoning": "1-2 frases en español",
-  "responseRules": ["regla 1", "regla 2"],
-  "useToolLoop": false,
-  "toolsHint": ["search_knowledge", "get_project_elements"]
-}`;
 
 function intentToDefaultPlan(
   intent: string,
   message: string,
   input: RouterInput,
   contextMode: ContextMode,
+  agentConfig: ChatAgentConfig,
   page?: number,
   chapter?: number
 ): ContextPlan {
@@ -79,11 +43,12 @@ function intentToDefaultPlan(
         ? `Manual Oslo página ${page} chapter section content`
         : `Manual Oslo Chapter ${chapter} capítulo ${chapter} resumen`,
       page,
-      chapter
+      chapter,
+      agentConfig
     );
   }
   if (intent === "knowledge") {
-    return knowledgeOnlyPlan(message);
+    return knowledgeOnlyPlan(message, undefined, undefined, agentConfig);
   }
   if (intent === "project") {
     return projectOnlyPlan(message);
@@ -91,7 +56,12 @@ function intentToDefaultPlan(
   return configOnlyPlan();
 }
 
-function applyHardRules(plan: ContextPlan, message: string, input: RouterInput): ContextPlan {
+function applyHardRules(
+  plan: ContextPlan,
+  message: string,
+  input: RouterInput,
+  agentConfig: ChatAgentConfig
+): ContextPlan {
   const m = message.toLowerCase();
   let p = { ...plan };
 
@@ -104,7 +74,7 @@ function applyHardRules(plan: ContextPlan, message: string, input: RouterInput):
     /\bqu[eé]\s+es\s+la\s+innovaci[oó]n\b/i.test(message);
   const asksProject = /\bproyecto\b/i.test(message) || input.hasProjectData;
   const asksConfig =
-    /\b(instrucciones?|formato\s+del\s+informe|elementos?\s+a\s+identificar|configuraci[oó]n)\b/i.test(
+    /\b(evaluaci[oó]n|formato\s+del\s+informe|elementos?\s+a\s+identificar|configuraci[oó]n)\b/i.test(
       message
     );
 
@@ -115,13 +85,13 @@ function applyHardRules(plan: ContextPlan, message: string, input: RouterInput):
     const nums =
       chapterNumbers.length >= 2 ? chapterNumbers : chapterNumbers.length === 1 ? chapterNumbers : [];
     if (nums.length >= 2) {
-      p = multiChapterComparisonPlan(p.ragQuery || message, nums);
+      p = multiChapterComparisonPlan(p.ragQuery || message, nums, agentConfig);
     }
   } else if (asksKnowledge && !asksRubric && !asksConfig) {
-    p = knowledgeOnlyPlan(p.ragQuery || message, p.pageNumber, p.chapterNumber);
+    p = knowledgeOnlyPlan(p.ragQuery || message, p.pageNumber, p.chapterNumber, agentConfig);
     if (asksProject && input.hasProjectData) {
       p.sources = ["knowledge_rag", "project", "project_structured"];
-      p.excludeSources = ["rubric", "instructions", "report_format", "config_summary"];
+      p.excludeSources = ["rubric", "report_format", "config_summary"];
       p.agentLevel = "B";
       p.complexity = "moderate";
       p.useToolLoop = true;
@@ -169,7 +139,7 @@ function applyHardRules(plan: ContextPlan, message: string, input: RouterInput):
 
   if (comparesMultiple) {
     if (multiChapter && asksKnowledge && chapterNumbers.length >= 2) {
-      p = multiChapterComparisonPlan(p.ragQuery || message, chapterNumbers);
+      p = multiChapterComparisonPlan(p.ragQuery || message, chapterNumbers, agentConfig);
     } else {
       p.agentLevel = "C";
       p.complexity = "complex";
@@ -216,6 +186,7 @@ function mapComplexityToLevel(complexity: ContextComplexity, useToolLoop: boolea
  * Nivel A: router LLM + reglas duras + fallback regex.
  */
 export async function routeContextPlan(input: RouterInput): Promise<ContextPlan> {
+  const agentConfig = await loadChatAgentConfig();
   const pageNumber = parsePageFromQuery(input.message);
   const chapterNumbers = parseChaptersFromQuery(input.message);
   const chapterNumber =
@@ -234,9 +205,10 @@ export async function routeContextPlan(input: RouterInput): Promise<ContextPlan>
 
   if (multiChapterCompare && chapterNumbers.length >= 2) {
     const plan = applyHardRules(
-      multiChapterComparisonPlan(input.message, chapterNumbers),
+      multiChapterComparisonPlan(input.message, chapterNumbers, agentConfig),
       input.message,
-      input
+      input,
+      agentConfig
     );
     return plan;
   }
@@ -246,18 +218,19 @@ export async function routeContextPlan(input: RouterInput): Promise<ContextPlan>
     input.message,
     input,
     contextMode,
+    agentConfig,
     pageNumber,
     chapterNumber
   );
 
   if (pageNumber != null || chapterNumber != null) {
-    return applyHardRules(fallback, input.message, input);
+    return applyHardRules(fallback, input.message, input, agentConfig);
   }
 
   try {
     const raw = await chatCompletion(
       [
-        { role: "system", content: ROUTER_SYSTEM },
+        { role: "system", content: agentConfig.routerSystemPrompt },
         {
           role: "user",
           content: `Pregunta del usuario: ${input.message}
@@ -265,7 +238,6 @@ export async function routeContextPlan(input: RouterInput): Promise<ContextPlan>
 Disponibilidad:
 - Proyecto subido: ${input.hasProjectData ? "sí" : "no"}
 - Rúbrica configurada: ${input.hasRubric ? "sí" : "no"}
-- Instrucciones configuradas: ${input.hasInstructions ? "sí" : "no"}
 - Knowledge indexado: ${input.hasKnowledge ? "sí" : "no"}`,
         },
       ],
@@ -291,13 +263,13 @@ Disponibilidad:
         },
         fallback
       );
-      return applyHardRules(plan, input.message, input);
+      return applyHardRules(plan, input.message, input, agentConfig);
     }
   } catch {
     /* fallback regex */
   }
 
-  return applyHardRules(fallback, input.message, input);
+  return applyHardRules(fallback, input.message, input, agentConfig);
 }
 
 export function planToIntentLabel(plan: ContextPlan): string {

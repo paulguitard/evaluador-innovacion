@@ -42,6 +42,14 @@ const FORM_ROW_TITLE_PATTERNS = [
   /justificaci/,
   /plan\s+de\s+trabajo/,
   /descripci.*solucion/,
+  /origen de la idea|surge.*idea/,
+  /avance actual|nivel de avance/,
+  /descripci.*emprendimiento/,
+  /segmento de clientes/,
+  /validaci.*clientes/,
+  /modelo de negocio/,
+  /componente tecnol/,
+  /\bsoluci[oó]n\b/,
 ];
 
 export function isContinuityElement(element: ElementLike): boolean {

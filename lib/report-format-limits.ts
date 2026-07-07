@@ -162,8 +162,8 @@ export function findSubdimensionLimits(
   return partial?.limits;
 }
 
-export function charRange(max: number): { min: number; max: number } {
-  return { min: Math.max(1, Math.floor(max * 0.9)), max };
+export function charRange(max: number, minRatio = 0.9): { min: number; max: number } {
+  return { min: Math.max(1, Math.floor(max * minRatio)), max };
 }
 
 export function formatLimitsTable(limits: ReportFormatLimits): string {

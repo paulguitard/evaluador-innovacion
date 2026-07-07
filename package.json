@@ -10,7 +10,12 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test:extract": "npx tsx --test lib/extract-regression.test.ts",
-    "migrate:config": "npx tsx scripts/migrate-config-to-postgres.ts"
+    "migrate:config": "npx tsx scripts/migrate-config-to-postgres.ts",
+    "backfill:type-configs": "npx tsx scripts/backfill-type-configs.ts",
+    "backfill:rag-meta": "node scripts/run-backfill-rag-meta.cjs",
+    "migrate:rubric-report": "npx tsx scripts/migrate-rubric-report-config.ts",
+    "migrate:evaluation-config": "npx tsx scripts/migrate-evaluation-config.ts",
+    "check:env": "npx tsx scripts/check-cloud-env.ts"
   },
   "dependencies": {
     "@react-pdf/renderer": "^4.0.0",

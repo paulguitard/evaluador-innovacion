@@ -71,19 +71,35 @@ describe("parseScoresJsonPayload", () => {
 describe("mergeAuthoritativeScores", () => {
   const schema = buildRubricScoreSchema(SAMPLE_RUBRIC);
 
-  it("prioriza JSON sobre fallbacks", () => {
+  it("prioriza evaluación §5 sobre JSON", () => {
     const key = subdimensionScoreKey("Novedad", "Estado del arte");
-    const merged = mergeAuthoritativeScores(
-      schema,
-      { [key]: 3 },
-      [{ [key]: 2 }]
-    );
+    const evalScores = { [key]: 4 };
+    const jsonScores = { [key]: 1 };
+    const merged = mergeAuthoritativeScores(schema, jsonScores, [evalScores]);
+    assert.equal(merged[key], 4);
+  });
+
+  it("usa JSON solo si las fuentes prioritarias no tienen la clave", () => {
+    const key = subdimensionScoreKey("Novedad", "Estado del arte");
+    const merged = mergeAuthoritativeScores(schema, { [key]: 3 }, [{}]);
     assert.equal(merged[key], 3);
   });
 
-  it("usa fallback si JSON no tiene la clave", () => {
+  it("usa fallback intermedio antes que JSON", () => {
     const key = subdimensionScoreKey("Novedad", "Estado del arte");
-    const merged = mergeAuthoritativeScores(schema, {}, [{ [key]: 2 }]);
+    const merged = mergeAuthoritativeScores(
+      schema,
+      { [key]: 1 },
+      [{}, { [key]: 2 }]
+    );
     assert.equal(merged[key], 2);
+  });
+
+  it("caso Beehappy: nota asignada Nota: 4 gana sobre JSON con 1 por criterio rúbrica", () => {
+    const key = subdimensionScoreKey("Potencial de impacto", "Contribución en el Conocimiento");
+    const evalScores = { [key]: 4 };
+    const jsonScores = { [key]: 1 };
+    const merged = mergeAuthoritativeScores(schema, jsonScores, [evalScores]);
+    assert.equal(merged[key], 4);
   });
 });

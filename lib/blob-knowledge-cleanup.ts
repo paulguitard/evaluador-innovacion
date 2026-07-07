@@ -10,7 +10,7 @@ export async function deleteRemovedBlobKnowledgeFiles(
 ): Promise<void> {
   if (!useBlobStorage()) return;
   for (const item of removed) {
-    if (typeof item !== "object" || !item?.url) continue;
+    if (!item?.url) continue;
     try {
       await del(item.url);
     } catch {

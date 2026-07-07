@@ -1,17 +1,17 @@
 import "server-only";
-import fs from "fs";
-import path from "path";
-import { getLlmModels, initDb, saveLlmModels } from "@/lib/db";
+
+import { getLlmModels, getLlmParams, saveLlmModels, saveLlmParams } from "@/lib/db";
 import {
   emptyLlmModels,
+  emptyLlmParams,
   isLlmModelsComplete,
   LLM_USE_CASE_LABELS,
   LLM_USE_CASES,
+  mergeLlmParams,
   type LlmConfigPublic,
   type LlmUseCase,
+  type LlmUseCaseParams,
 } from "@/lib/llm-config-types";
-
-const LEGACY_CONFIG_PATH = path.join(process.cwd(), "data", "llm-config.json");
 
 function normalizeModels(raw: Record<string, unknown> | null | undefined): Record<LlmUseCase, string> {
   const models = emptyLlmModels();
@@ -25,36 +25,24 @@ function normalizeModels(raw: Record<string, unknown> | null | undefined): Recor
   return models;
 }
 
-function readLegacyModelsFromFile(): Record<LlmUseCase, string> | null {
-  try {
-    if (!fs.existsSync(LEGACY_CONFIG_PATH)) return null;
-    const raw = JSON.parse(fs.readFileSync(LEGACY_CONFIG_PATH, "utf-8")) as Record<string, unknown>;
-    if (!raw?.models || typeof raw.models !== "object") return null;
-    const models = normalizeModels(raw.models as Record<string, unknown>);
-    return LLM_USE_CASES.some((useCase) => !!models[useCase].trim()) ? models : null;
-  } catch {
-    return null;
-  }
-}
-
 async function loadModelsFromStore(): Promise<Record<LlmUseCase, string>> {
-  await initDb();
   const fromDb = await getLlmModels();
   if (fromDb) return normalizeModels(fromDb);
-
-  const legacy = readLegacyModelsFromFile();
-  if (legacy) {
-    if (isLlmModelsComplete(legacy)) {
-      await saveLlmModels(legacy);
-    }
-    return legacy;
-  }
-
   return emptyLlmModels();
+}
+
+async function loadParamsFromStore(): Promise<Record<LlmUseCase, LlmUseCaseParams>> {
+  const fromDb = await getLlmParams();
+  if (fromDb) return mergeLlmParams(fromDb as Partial<Record<LlmUseCase, Partial<LlmUseCaseParams>>>);
+  return emptyLlmParams();
 }
 
 export async function loadLlmModels(): Promise<Record<LlmUseCase, string>> {
   return loadModelsFromStore();
+}
+
+export async function loadLlmParams(): Promise<Record<LlmUseCase, LlmUseCaseParams>> {
+  return loadParamsFromStore();
 }
 
 export async function saveLlmModelsConfig(models: Record<LlmUseCase, string>): Promise<void> {
@@ -62,8 +50,11 @@ export async function saveLlmModelsConfig(models: Record<LlmUseCase, string>): P
   if (!isLlmModelsComplete(normalized)) {
     throw new Error("Debe configurar un modelo para cada función en Configurar LLM.");
   }
-  await initDb();
   await saveLlmModels(normalized);
+}
+
+export async function saveLlmParamsConfig(params: Record<LlmUseCase, LlmUseCaseParams>): Promise<void> {
+  await saveLlmParams(mergeLlmParams(params));
 }
 
 export function getApiKey(): string {
@@ -97,10 +88,23 @@ export async function resolveModelForUseCase(
   return model;
 }
 
+export async function resolveParamsForUseCase(
+  useCase: LlmUseCase,
+  overrides?: { temperature?: number; max_tokens?: number }
+): Promise<LlmUseCaseParams> {
+  const params = await loadParamsFromStore();
+  const base = params[useCase];
+  return {
+    temperature: overrides?.temperature ?? base.temperature,
+    max_tokens: overrides?.max_tokens ?? base.max_tokens,
+  };
+}
+
 export async function getLlmConfigPublic(): Promise<LlmConfigPublic> {
-  const models = await loadLlmModels();
+  const [models, params] = await Promise.all([loadLlmModels(), loadLlmParams()]);
   return {
     models,
+    params,
     hasOpenRouterApiKey: hasOpenRouterApiKey(),
     modelsComplete: isLlmModelsComplete(models),
   };

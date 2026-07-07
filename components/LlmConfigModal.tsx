@@ -3,14 +3,18 @@
 import { useState, useEffect } from "react";
 import {
   emptyLlmModels,
+  emptyLlmParams,
   isLlmModelsComplete,
   LLM_USE_CASE_LABELS,
   LLM_USE_CASES,
+  mergeLlmParams,
   type LlmUseCase,
+  type LlmUseCaseParams,
 } from "@/lib/llm-config-types";
 
 type LlmConfigResponse = {
   models: Record<LlmUseCase, string>;
+  params?: Partial<Record<LlmUseCase, LlmUseCaseParams>>;
   hasOpenRouterApiKey: boolean;
   modelsComplete: boolean;
 };
@@ -23,6 +27,7 @@ export default function LlmConfigModal({
   onClose: () => void;
 }) {
   const [models, setModels] = useState<Record<LlmUseCase, string>>(emptyLlmModels());
+  const [params, setParams] = useState<Record<LlmUseCase, LlmUseCaseParams>>(emptyLlmParams());
   const [hasOpenRouterApiKey, setHasOpenRouterApiKey] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -36,6 +41,7 @@ export default function LlmConfigModal({
       .then((r) => r.json())
       .then((data: LlmConfigResponse) => {
         if (data.models) setModels({ ...emptyLlmModels(), ...data.models });
+        setParams(mergeLlmParams(data.params));
         setHasOpenRouterApiKey(!!data.hasOpenRouterApiKey);
       })
       .catch(() => setMessage("No se pudo cargar la configuración LLM."))
@@ -53,11 +59,12 @@ export default function LlmConfigModal({
       const res = await fetch("/api/llm-config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ models }),
+        body: JSON.stringify({ models, params }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Error al guardar");
       if (data.models) setModels({ ...emptyLlmModels(), ...data.models });
+      if (data.params) setParams(mergeLlmParams(data.params));
       setHasOpenRouterApiKey(!!data.hasOpenRouterApiKey);
       setMessage("Configuración LLM guardada.");
     } catch (e) {
@@ -130,9 +137,9 @@ export default function LlmConfigModal({
                   <code className="text-[11px]">openai/gpt-4o</code>). Todos los campos son
                   obligatorios; no hay modelos por defecto.
                 </p>
-                <div className="mt-3 space-y-3">
+                <div className="mt-3 space-y-4">
                   {LLM_USE_CASES.map((useCase) => (
-                    <div key={useCase}>
+                    <div key={useCase} className="rounded border border-gray-200 p-3 dark:border-gray-600">
                       <label className="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
                         {LLM_USE_CASE_LABELS[useCase]}
                       </label>
@@ -146,6 +153,50 @@ export default function LlmConfigModal({
                         className={inputClass}
                         required
                       />
+                      <div className="mt-2 grid grid-cols-2 gap-2">
+                        <label className="text-xs text-gray-600 dark:text-gray-400">
+                          Temperatura (0–2)
+                          <input
+                            type="number"
+                            min={0}
+                            max={2}
+                            step={0.1}
+                            value={params[useCase]?.temperature ?? 0}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              setParams((prev) => ({
+                                ...prev,
+                                [useCase]: {
+                                  ...prev[useCase],
+                                  temperature: Number.isFinite(v) ? v : prev[useCase].temperature,
+                                },
+                              }));
+                            }}
+                            className={`mt-1 ${inputClass}`}
+                          />
+                        </label>
+                        <label className="text-xs text-gray-600 dark:text-gray-400">
+                          max_tokens
+                          <input
+                            type="number"
+                            min={0}
+                            max={128000}
+                            step={256}
+                            value={params[useCase]?.max_tokens ?? 0}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              setParams((prev) => ({
+                                ...prev,
+                                [useCase]: {
+                                  ...prev[useCase],
+                                  max_tokens: Number.isFinite(v) ? Math.round(v) : prev[useCase].max_tokens,
+                                },
+                              }));
+                            }}
+                            className={`mt-1 ${inputClass}`}
+                          />
+                        </label>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -180,7 +231,7 @@ export default function LlmConfigModal({
             disabled={saving || loading}
             className="rounded bg-gray-600 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 dark:bg-gray-500 dark:hover:bg-gray-600 disabled:opacity-50"
           >
-            {saving ? "Guardando…" : "Guardar modelos"}
+            {saving ? "Guardando…" : "Guardar"}
           </button>
         </div>
       </div>

@@ -1,5 +1,5 @@
 import type { BulkProjectRow } from "@/hooks/useBulkEvaluation";
-import type { RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
+import { formatIndicatorScore, type RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
 import { generateEvaluationPdfBlob, sanitizeFileName } from "@/lib/evaluation-pdf";
 
 function downloadBlob(blob: Blob, fileName: string): void {
@@ -40,7 +40,7 @@ export async function exportBulkResultsExcel(
       row.extractionStatus,
       row.evaluationStatus,
       ...schema.map((s) => row.subdimensionScores[s.key] ?? ""),
-      row.overallScore ?? "",
+      row.overallScore != null ? formatIndicatorScore(row.overallScore) : "",
     ]);
   }
 

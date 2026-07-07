@@ -1,18 +1,11 @@
 import { NextResponse } from "next/server";
 import path from "path";
-import fs from "fs";
 import { put as blobPut } from "@vercel/blob";
-import {
-  getKnowledgeDir,
-  getRubricPath,
-  listSessionProjectFilePaths,
-} from "@/lib/storage";
-import { getConfig, updateConfig } from "@/lib/db";
+import { listSessionProjectFilePaths } from "@/lib/storage";
 import { getSupportedExtensions, getProjectUploadExtensions } from "@/lib/document-parser";
-import { indexKnowledge } from "@/lib/rag-index";
 import { ingestProjectFiles } from "@/lib/project-ingest";
 import { saveProjectBuffersToSession } from "@/lib/session-project-files";
-import { useBlobStorage } from "@/lib/blob-storage";
+import { assertBlobStorageConfigured } from "@/lib/blob-storage";
 import { sanitizeFilename } from "@/lib/sanitize-filename";
 import {
   registerKnowledgeUploads,
@@ -22,7 +15,7 @@ import { MAX_VERCEL_SERVER_UPLOAD_BYTES } from "@/lib/upload-limits";
 
 export const maxDuration = 300;
 
-type UploadKind = "knowledge" | "rubric" | "project";
+type UploadKind = "knowledge" | "project";
 
 const ALLOWED_EXT = new Set(getSupportedExtensions());
 
@@ -30,97 +23,38 @@ export async function POST(request: Request) {
   try {
     const formData = await request.formData();
     const kind = formData.get("kind") as UploadKind | null;
-    if (!kind || !["knowledge", "rubric", "project"].includes(kind)) {
-      return NextResponse.json({ error: "kind must be knowledge, rubric, or project" }, { status: 400 });
+    if (!kind || !["knowledge", "project"].includes(kind)) {
+      return NextResponse.json({ error: "kind must be knowledge or project" }, { status: 400 });
     }
 
     if (kind === "knowledge") {
+      assertBlobStorageConfigured();
       const typeIdStr = formData.get("evaluationTypeId");
       const typeId = typeIdStr ? Number(typeIdStr) : NaN;
       if (!Number.isInteger(typeId)) {
         return NextResponse.json({ error: "evaluationTypeId required for knowledge" }, { status: 400 });
       }
       const files = formData.getAll("files") as File[];
-      const useBlob = useBlobStorage();
-
-      if (useBlob) {
-        const uploaded: KnowledgeEntry[] = [];
-        for (const file of files) {
-          if (!file?.name) continue;
-          const ext = path.extname(file.name).toLowerCase();
-          if (!ALLOWED_EXT.has(ext)) continue;
-          if (file.size >= MAX_VERCEL_SERVER_UPLOAD_BYTES) {
-            return NextResponse.json(
-              {
-                error: `El archivo "${file.name}" supera 4,5 MB. En Vercel la subida debe ir directo a Blob (actualiza la app).`,
-              },
-              { status: 413 }
-            );
-          }
-          const filename = sanitizeFilename(file.name);
-          const pathname = `knowledge/${typeId}/${filename}`;
-          const blob = await blobPut(pathname, file, { access: "public", addRandomSuffix: true });
-          uploaded.push({ name: filename, url: blob.url });
-        }
-        const result = await registerKnowledgeUploads(typeId, uploaded);
-        return NextResponse.json(result);
-      }
-
-      const dir = getKnowledgeDir(typeId);
-      const saved: string[] = [];
+      const uploaded: KnowledgeEntry[] = [];
       for (const file of files) {
         if (!file?.name) continue;
         const ext = path.extname(file.name).toLowerCase();
         if (!ALLOWED_EXT.has(ext)) continue;
+        if (file.size >= MAX_VERCEL_SERVER_UPLOAD_BYTES) {
+          return NextResponse.json(
+            {
+              error: `El archivo "${file.name}" supera 4,5 MB. Usa la subida directa a Blob desde el navegador.`,
+            },
+            { status: 413 }
+          );
+        }
         const filename = sanitizeFilename(file.name);
-        const filepath = path.join(dir, filename);
-        const buf = Buffer.from(await file.arrayBuffer());
-        fs.writeFileSync(filepath, buf);
-        saved.push(filename);
-      }
-      const config = await getConfig(typeId);
-      const currentPaths = config?.knowledge_paths ? (() => { try { return JSON.parse(config.knowledge_paths) as string[]; } catch { return []; } })() : [];
-      const newPaths = [...new Set([...currentPaths, ...saved])];
-      await updateConfig(typeId, { knowledge_paths: newPaths });
-      let chunkCount: number | undefined;
-      let indexError: string | undefined;
-      try {
-        const result = await indexKnowledge(typeId, { reindexDocNames: saved });
-        chunkCount = result.chunkCount;
-      } catch (e) {
-        indexError = e instanceof Error ? e.message : String(e);
-      }
-      return NextResponse.json({ saved, knowledge_paths: newPaths, chunkCount, indexError });
-    }
-
-    if (kind === "rubric") {
-      const typeIdStr = formData.get("evaluationTypeId");
-      const typeId = typeIdStr ? Number(typeIdStr) : NaN;
-      if (!Number.isInteger(typeId)) {
-        return NextResponse.json({ error: "evaluationTypeId required for rubric" }, { status: 400 });
-      }
-      const file = formData.get("file") as File | null;
-      if (!file?.name) {
-        return NextResponse.json({ error: "file required for rubric" }, { status: 400 });
-      }
-      const ext = path.extname(file.name).toLowerCase();
-      if (!ALLOWED_EXT.has(ext)) {
-        return NextResponse.json({ error: "Unsupported file type for rubric" }, { status: 400 });
-      }
-      const useBlob = useBlobStorage();
-      if (useBlob) {
-        const filename = sanitizeFilename(file.name);
-        const pathname = `rubric/${typeId}/${filename}`;
+        const pathname = `knowledge/${typeId}/${filename}`;
         const blob = await blobPut(pathname, file, { access: "public", addRandomSuffix: true });
-        await updateConfig(typeId, { rubric_path: blob.url });
-        return NextResponse.json({ rubric_path: blob.url });
+        uploaded.push({ name: filename, url: blob.url });
       }
-      const filepath = getRubricPath(typeId, file.name);
-      const buf = Buffer.from(await file.arrayBuffer());
-      fs.writeFileSync(filepath, buf);
-      const rubricPath = path.basename(filepath);
-      await updateConfig(typeId, { rubric_path: rubricPath });
-      return NextResponse.json({ rubric_path: rubricPath });
+      const result = await registerKnowledgeUploads(typeId, uploaded);
+      return NextResponse.json(result);
     }
 
     if (kind === "project") {

@@ -7,7 +7,8 @@ import {
 } from "@/lib/rag-retrieve";
 import { buildKnowledgeRagQueries } from "@/lib/rag-query-expand";
 import { summarizeChunks } from "@/lib/agent-events";
-import { CONTEXT_LIMITS } from "@/lib/rag-limits";
+import { getContextLimits } from "@/lib/rag-limits";
+import { getEvaluationTypeSettings } from "@/lib/evaluation-type-settings-server";
 import type { ContextPlan } from "@/lib/context-plan";
 import type { ProjectStructuredData } from "@/lib/build-context";
 import { searchProjectForQuery } from "@/lib/project-extract-tools";
@@ -97,7 +98,7 @@ export const AGENT_TOOL_DEFINITIONS = [
         properties: {
           section: {
             type: "string",
-            enum: ["instructions", "report_format", "elements", "summary"],
+            enum: ["evaluation", "report_format", "elements", "summary"],
             description: "Sección a leer",
           },
         },
@@ -168,7 +169,8 @@ export async function executeAgentTool(
       if (!(await hasActiveKnowledgeIndex(ctx.evaluationTypeId))) {
         return { summary: "El índice RAG no está disponible. Reindexe el Knowledge.", ok: false };
       }
-      const limits = CONTEXT_LIMITS[ctx.plan.ragMode];
+      const typeSettings = await getEvaluationTypeSettings(ctx.evaluationTypeId);
+      const limits = getContextLimits(ctx.plan.ragMode, typeSettings.rag);
       const chapterQueries =
         ctx.plan.chapterNumbers && ctx.plan.chapterNumbers.length >= 2
           ? ctx.plan.chapterNumbers.map(
@@ -235,15 +237,18 @@ export async function executeAgentTool(
       const config = await getConfig(ctx.evaluationTypeId);
       if (!config) return { summary: "Configuración no encontrada.", ok: false };
       let text = "";
-      if (section === "instructions") {
-        text = (config.instructions ?? config.prompt ?? "").trim();
+      if (section === "evaluation") {
+        text = [
+          "La metodología de evaluación está programada en la aplicación.",
+          "Parámetros configurables en §5 Evaluación (índice, knowledge, límites por fase).",
+        ].join(" ");
       } else if (section === "report_format") {
         text = (config.report_format ?? "").trim();
       } else if (section === "elements") {
         text = config.elements ?? "[]";
       } else {
         text = [
-          `Instrucciones: ${(config.instructions ?? config.prompt ?? "").trim() || "vacío"}`,
+          `Evaluación: metodología programada (§5 configurable)`,
           `Formato informe: ${(config.report_format ?? "").trim() || "vacío"}`,
           `Rúbrica: ${(config.rubric_prompt ?? "").trim() ? "configurada" : "no configurada"}`,
         ].join("\n");

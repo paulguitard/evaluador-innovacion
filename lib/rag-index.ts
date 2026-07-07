@@ -3,9 +3,7 @@ import { chunkText } from "@/lib/chunking";
 import { embedTexts } from "@/lib/embeddings";
 import { loadChunksAsync, saveChunks, type StoredChunk } from "@/lib/vector-store";
 import { detectPrintedPageInText } from "@/lib/page-lookup";
-
-const CHUNK_SIZE = 1000;
-const OVERLAP = 150;
+import { getEvaluationTypeSettings } from "@/lib/evaluation-type-settings-server";
 
 export type IndexKnowledgeResult = { chunkCount: number };
 
@@ -15,13 +13,15 @@ export type IndexKnowledgeOptions = {
 };
 
 function segmentsToStoredChunks(
-  segments: { docName: string; text: string; page?: number }[]
+  segments: { docName: string; text: string; page?: number }[],
+  chunkSize: number,
+  overlap: number
 ): { allChunks: ReturnType<typeof chunkText>; texts: string[] } {
   const allChunks: ReturnType<typeof chunkText> = [];
   for (const { docName, text, page } of segments) {
     const chunks = chunkText(text, docName, {
-      chunkSizeChars: CHUNK_SIZE,
-      overlapChars: OVERLAP,
+      chunkSizeChars: chunkSize,
+      overlapChars: overlap,
       page,
     });
     allChunks.push(...chunks);
@@ -54,6 +54,9 @@ export async function indexKnowledge(
   evaluationTypeId: number,
   options: IndexKnowledgeOptions = {}
 ): Promise<IndexKnowledgeResult> {
+  const settings = await getEvaluationTypeSettings(evaluationTypeId);
+  const chunkSize = settings.rag.chunkSizeChars;
+  const overlap = settings.rag.overlapChars;
   const segments = await getKnowledgePageSegments(evaluationTypeId);
   const currentDocNames = [...new Set(segments.map((s) => s.docName))];
 
@@ -81,7 +84,7 @@ export async function indexKnowledge(
     return { chunkCount: kept.length };
   }
 
-  const { allChunks, texts } = segmentsToStoredChunks(segmentsToIndex);
+  const { allChunks, texts } = segmentsToStoredChunks(segmentsToIndex, chunkSize, overlap);
   if (allChunks.length === 0) {
     const merged = kept;
     await saveChunks(evaluationTypeId, merged, {

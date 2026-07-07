@@ -1,5 +1,5 @@
 import { isKnowledgeConfigured, loadActiveChunks } from "@/lib/knowledge-config";
-import { loadChunks, type StoredChunk } from "@/lib/vector-store";
+import type { StoredChunk } from "@/lib/vector-store";
 import { normalizeDocText, type PageChunk } from "@/lib/page-lookup";
 
 export type ChapterOutlineSection = {

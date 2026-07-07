@@ -1,77 +1,54 @@
-import path from "path";
-import { getVectorsDir } from "@/lib/storage";
-import {
-  loadChunksFromStore,
-  loadMetaFromStore,
-  saveChunksToStore,
-  type ChunkStoreConfig,
-} from "@/lib/chunk-store";
 import {
   loadKnowledgeChunksFromBlob,
   loadKnowledgeMetaFromBlob,
   saveKnowledgeChunksToBlob,
+  clearKnowledgeVectorsBlob,
 } from "@/lib/blob-chunk-store";
-import { useBlobStorage } from "@/lib/blob-storage";
+import { assertBlobStorageConfigured } from "@/lib/blob-storage";
+import { chunkCacheKey } from "@/lib/chunk-cache";
+import {
+  getCachedChunksAsync,
+  invalidateAsyncChunkCache,
+} from "@/lib/chunk-cache-async";
+import type { KnowledgeIndexMeta, StoredChunk } from "@/lib/chunk-types";
 
-export type StoredChunk = {
-  id: string;
-  docName: string;
-  text: string;
-  embedding: number[];
-  /** Número de página del PDF (1-based), si está disponible. */
-  page?: number;
-  /** Número de página impresa en el documento (cabecera Oslo: | 201). */
-  printedPage?: number;
-};
+export type { KnowledgeIndexMeta, StoredChunk } from "@/lib/chunk-types";
 
-const CHUNKS_FILE = "chunks.json";
-const META_FILE = "meta.json";
-
-export type KnowledgeIndexMeta = {
-  indexedAt: string;
-  knowledgeVersion?: string;
-};
-
-function storeConfig(evaluationTypeId: number): ChunkStoreConfig {
+function buildMetaWithStats(
+  chunks: StoredChunk[],
+  meta?: KnowledgeIndexMeta
+): KnowledgeIndexMeta {
+  const body = JSON.stringify(chunks);
   return {
-    kind: "knowledge",
-    id: evaluationTypeId,
-    dir: getVectorsDir(evaluationTypeId),
-    chunksFile: CHUNKS_FILE,
-    metaFile: META_FILE,
+    indexedAt: meta?.indexedAt ?? new Date().toISOString(),
+    knowledgeVersion: meta?.knowledgeVersion,
+    chunkCount: chunks.length,
+    chunksFileBytes: body.length,
   };
 }
 
-function loadChunksFromDisk(evaluationTypeId: number): StoredChunk[] {
-  return loadChunksFromStore(storeConfig(evaluationTypeId));
-}
-
-/** Carga chunks: en Blob primero; en local, disco y luego Blob. */
+/** Carga chunks del índice RAG desde Vercel Blob (con caché en memoria por instancia). */
 export async function loadChunksAsync(evaluationTypeId: number): Promise<StoredChunk[]> {
-  if (useBlobStorage()) {
+  const key = chunkCacheKey("knowledge", evaluationTypeId);
+  return getCachedChunksAsync(key, async () => {
     const fromBlob = await loadKnowledgeChunksFromBlob(evaluationTypeId);
-    if (fromBlob && fromBlob.length > 0) return fromBlob;
-  }
-  return loadChunksFromDisk(evaluationTypeId);
+    return fromBlob ?? [];
+  });
 }
 
-/** @deprecated Prefer loadChunksAsync en serverless. */
+/** @deprecated Prefer loadChunksAsync. */
 export function loadChunks(evaluationTypeId: number): StoredChunk[] {
-  return loadChunksFromDisk(evaluationTypeId);
+  throw new Error("loadChunks síncrono no disponible; use loadChunksAsync.");
 }
 
 export async function loadChunksMetaAsync(
   evaluationTypeId: number
 ): Promise<KnowledgeIndexMeta | null> {
-  if (useBlobStorage()) {
-    const fromBlob = await loadKnowledgeMetaFromBlob(evaluationTypeId);
-    if (fromBlob) return fromBlob;
-  }
-  return loadMetaFromStore<KnowledgeIndexMeta>(storeConfig(evaluationTypeId));
+  return loadKnowledgeMetaFromBlob(evaluationTypeId);
 }
 
-export function loadChunksMeta(evaluationTypeId: number): KnowledgeIndexMeta | null {
-  return loadMetaFromStore<KnowledgeIndexMeta>(storeConfig(evaluationTypeId));
+export function loadChunksMeta(_evaluationTypeId: number): KnowledgeIndexMeta | null {
+  throw new Error("loadChunksMeta síncrono no disponible; use loadChunksMetaAsync.");
 }
 
 export async function saveChunks(
@@ -79,11 +56,13 @@ export async function saveChunks(
   chunks: StoredChunk[],
   meta?: KnowledgeIndexMeta
 ): Promise<void> {
-  if (useBlobStorage()) {
-    await saveKnowledgeChunksToBlob(evaluationTypeId, chunks, meta);
-    return;
+  assertBlobStorageConfigured();
+  const enrichedMeta = buildMetaWithStats(chunks, meta);
+  await saveKnowledgeChunksToBlob(evaluationTypeId, chunks, enrichedMeta);
+  invalidateAsyncChunkCache(chunkCacheKey("knowledge", evaluationTypeId));
+  if (chunks.length === 0) {
+    await clearKnowledgeVectorsBlob(evaluationTypeId);
   }
-  saveChunksToStore(storeConfig(evaluationTypeId), chunks, meta);
 }
 
 export async function hasChunksAsync(evaluationTypeId: number): Promise<boolean> {
@@ -91,6 +70,6 @@ export async function hasChunksAsync(evaluationTypeId: number): Promise<boolean>
   return chunks.length > 0;
 }
 
-export function hasChunks(evaluationTypeId: number): boolean {
-  return loadChunks(evaluationTypeId).length > 0;
+export function hasChunks(_evaluationTypeId: number): boolean {
+  throw new Error("hasChunks síncrono no disponible; use hasChunksAsync.");
 }

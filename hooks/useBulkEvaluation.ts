@@ -8,6 +8,12 @@ import { fileBaseName } from "@/lib/evaluation-mode";
 import { runExtractStream } from "@/lib/run-extract-stream";
 import { runEvaluateStream } from "@/lib/run-evaluate-stream";
 import { getLastStreamLine } from "@/lib/stream-line";
+import { fetchBulkEvaluationConfig } from "@/lib/bulk-evaluation-config-client";
+import {
+  ensureKnowledgeIndex,
+  releasePinnedKnowledgeIndex,
+} from "@/lib/knowledge-index-cache";
+import type { StoredChunk } from "@/lib/chunk-types";
 
 export type BulkProjectStatus = "pending" | "running" | "done" | "error";
 
@@ -25,7 +31,13 @@ export type BulkProjectRow = {
   errorMessage?: string;
 };
 
-const BULK_CONCURRENCY = 3;
+async function cleanupSession(sessionId: string): Promise<void> {
+  await fetch("/api/session-cleanup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sessionId }),
+  }).catch(() => {});
+}
 
 function extractProjectName(
   elementsTable: { element: string; content: string }[],
@@ -53,14 +65,6 @@ async function extractWithFile(
     onTraceUpdate,
     signal,
   });
-}
-
-async function cleanupSession(sessionId: string): Promise<void> {
-  await fetch("/api/session-cleanup", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId }),
-  }).catch(() => {});
 }
 
 function rowIdForFile(index: number, fileName: string): string {
@@ -130,7 +134,6 @@ export function useBulkEvaluation(
             status: patch.status ?? "pending",
             trace: patch.trace ?? [],
             streamLine: patch.streamLine ?? "Iniciando…",
-            reportPreview: patch.reportPreview ?? "",
             ...patch,
           },
         ];
@@ -156,11 +159,39 @@ export function useBulkEvaluation(
       let completed = 0;
       let failed = 0;
 
+      const bulkConfig = await fetchBulkEvaluationConfig();
+      const parallelProjects = bulkConfig.parallelProjects;
+      let sharedKnowledgeChunks: StoredChunk[] | undefined;
+
+      if (bulkConfig.useClientKnowledgeIndex && bulkConfig.preloadKnowledgeOnBulkStart) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Precargando índice de referencia en memoria…",
+          },
+        ]);
+        const loaded = await ensureKnowledgeIndex(activeTypeId, (p) => {
+          if (p.message) {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.role === "assistant" && last.content.startsWith("Precargando")) {
+                const next = [...prev];
+                next[next.length - 1] = { ...last, content: p.message! };
+                return next;
+              }
+              return [...prev, { role: "assistant", content: p.message! }];
+            });
+          }
+        });
+        sharedKnowledgeChunks = loaded.chunks;
+      }
+
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: `Iniciando evaluación masiva de ${files.length} proyecto(s) en grupos de ${BULK_CONCURRENCY}…`,
+          content: `Iniciando evaluación masiva de ${files.length} proyecto(s) en grupos de ${parallelProjects}…`,
         },
       ]);
 
@@ -168,8 +199,6 @@ export function useBulkEvaluation(
         const rowId = rowIdForFile(index, file.name);
         const sessionId = `bulk-${runId}-${index}`;
         sessionIdsRef.current.push(sessionId);
-
-        let reportPreview = "";
 
         const syncAgent = (
           status: BulkAgentSlotStatus,
@@ -179,8 +208,7 @@ export function useBulkEvaluation(
           patchAgentSlot(rowId, {
             status,
             trace,
-            streamLine: getLastStreamLine(trace, reportPreview),
-            reportPreview,
+            streamLine: getLastStreamLine(trace),
             ...extra,
           });
         };
@@ -193,7 +221,6 @@ export function useBulkEvaluation(
           status: "extracting",
           trace: [],
           streamLine: "Subiendo archivo…",
-          reportPreview: "",
         });
         updateRow(rowId, { extractionStatus: "running", evaluationStatus: "pending" });
 
@@ -220,21 +247,8 @@ export function useBulkEvaluation(
               element: r.element,
               content: r.content,
             })),
+            knowledgeChunks: sharedKnowledgeChunks,
             onTraceUpdate: (trace) => syncAgent("evaluating", trace),
-            onContentUpdate: (full) => {
-              reportPreview = full;
-              setBulkAgents((prev) =>
-                prev.map((slot) =>
-                  slot.rowId === rowId
-                    ? {
-                        ...slot,
-                        reportPreview: full,
-                        streamLine: getLastStreamLine(slot.trace, full),
-                      }
-                    : slot
-                )
-              );
-            },
             signal: controller.signal,
           });
 
@@ -249,7 +263,6 @@ export function useBulkEvaluation(
           patchAgentSlot(rowId, {
             status: "done",
             trace: evalResult.trace,
-            reportPreview: evalResult.reportContent,
             streamLine: "Evaluación finalizada con éxito.",
           });
           completed++;
@@ -278,10 +291,10 @@ export function useBulkEvaluation(
         }
       };
 
-      for (let batchStart = 0; batchStart < files.length; batchStart += BULK_CONCURRENCY) {
+      for (let batchStart = 0; batchStart < files.length; batchStart += parallelProjects) {
         if (controller.signal.aborted) break;
 
-        const batch = files.slice(batchStart, batchStart + BULK_CONCURRENCY);
+        const batch = files.slice(batchStart, batchStart + parallelProjects);
         setBulkAgents((prev) => {
           const incoming: BulkAgentSlot[] = batch.map((file, i) => ({
             rowId: rowIdForFile(batchStart + i, file.name),
@@ -291,7 +304,6 @@ export function useBulkEvaluation(
             status: "pending",
             trace: [],
             streamLine: "En cola…",
-            reportPreview: "",
           }));
           const existing = new Set(prev.map((s) => s.rowId));
           return [...prev, ...incoming.filter((s) => !existing.has(s.rowId))];
@@ -302,6 +314,7 @@ export function useBulkEvaluation(
 
       setBulkRunning(false);
       abortRef.current = null;
+      releasePinnedKnowledgeIndex();
 
       if (!controller.signal.aborted) {
         setMessages((prev) => [

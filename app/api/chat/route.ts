@@ -58,6 +58,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "message required" }, { status: 400 });
     }
 
+    const precomputedKnowledgeChunks =
+      Array.isArray(body?.precomputedKnowledgeChunks) &&
+      body.precomputedKnowledgeChunks.length > 0
+        ? body.precomputedKnowledgeChunks
+        : undefined;
+    const clientRagEnabled = body?.clientRagEnabled === true;
+
     const encoder = new TextEncoder();
     const readable = new ReadableStream({
       async start(controller) {
@@ -71,6 +78,8 @@ export async function POST(request: Request) {
             projectStructuredData,
             bulkEvaluationContext: bulkEvaluationContext || undefined,
             history,
+            precomputedKnowledgeChunks,
+            clientRagEnabled,
           })) {
             emit(controller, encoder, event);
           }

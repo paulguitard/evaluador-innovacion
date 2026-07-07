@@ -1,25 +1,14 @@
 import { chatCompletion } from "@/lib/openrouter";
 import type { ElementDef } from "@/lib/excel-heuristics";
 
-const STRUCTURE_SYSTEM_PROMPT = `Eres un asistente que estructura tablas de indicadores de proyectos IGIP.
+const DEFAULT_STRUCTURE_PROMPT = `Eres un asistente que estructura tablas de indicadores de proyectos.
 
 Recibirás datos crudos de la hoja Excel "Indicadores" (filas con etiquetas de columna).
 Tu tarea es reescribirlos de forma clara y legible para un evaluador humano.
 
 REGLAS DE FORMATO:
 - Un bloque numerado por cada indicador (1, 2, 3…).
-- Dentro de cada bloque usa etiquetas en líneas separadas, por ejemplo:
-  **Nombre del indicador:** …
-  **Objetivo general:** …
-  **Objetivos específicos:** …
-  **Descripción:** …
-  **Forma de cálculo:** …
-  **Resultado esperado:** …
-  **Resultado alcanzado:** …
-  **% cumplimiento / % avance:** …
-  **Meta:** …
-  **Evidencias / medio de verificación:** …
-- Si hay filas "Meta:" asociadas a un indicador, inclúyelas dentro del mismo bloque.
+- Dentro de cada bloque usa etiquetas en líneas separadas.
 - NO uses pipes (|), tablas de una sola línea ni listas compactas ilegibles.
 - NO inventes datos; solo reorganiza fielmente lo que aparece en los datos crudos.
 - Omite campos vacíos.
@@ -40,16 +29,14 @@ function parseStructureJson(raw: string): { content: string; confidence: string 
   }
 }
 
-/**
- * El LLM reorganiza la tabla cruda de Indicadores en bloques legibles.
- */
 export async function structureIndicatorsWithLlm(
   element: ElementDef,
-  rawContext: string
+  rawContext: string,
+  structurePrompt?: string
 ): Promise<{ content: string; confidence: string }> {
   const response = await chatCompletion(
     [
-      { role: "system", content: STRUCTURE_SYSTEM_PROMPT },
+      { role: "system", content: structurePrompt?.trim() || DEFAULT_STRUCTURE_PROMPT },
       {
         role: "user",
         content: `Elemento: "${element.title}"

@@ -1,37 +1,46 @@
 import { getConfig } from "@/lib/db";
+import { getEvaluationTypeByIdPostgres } from "@/lib/db-postgres";
 import { buildSystemContext } from "@/lib/build-context";
-import { streamChat, chatCompletion } from "@/lib/openrouter";
+import { streamChat } from "@/lib/openrouter";
+import { getEvaluationConfig } from "@/lib/evaluation-config-server";
+import type { EvaluationConfig } from "@/lib/evaluation-config";
+import { EvaluateLlmSemaphore } from "@/lib/evaluate-concurrency";
+import { stripCharacterLimitAnnotations } from "@/lib/report-format-limits";
+import { collectAssembledReport, generateFinalSynthesisSection } from "@/lib/assemble-formatted-report";
 import {
-  charRange,
-  findDimensionLimits,
-  findSubdimensionLimits,
-  formatLimitsTable,
-  parseReportFormatLimits,
-  stripCharacterLimitAnnotations,
-  type ReportFormatLimits,
-  type SubdimensionFieldLimits,
-} from "@/lib/report-format-limits";
+  enrichReportFormatWithLegacySections,
+  findCustomSectionByTitlePattern,
+  getSynthesisMaxChars,
+  isReportFormatValid,
+  mergeReportFormatConfig,
+  type ReportFormatConfig,
+} from "@/lib/report-format-config";
 import {
   backfillSubdimensionScores,
   buildEvaluationInputForSummary,
-  buildRubricScoreSchema,
   computeWeightedIndicatorScore,
   finalizeEvaluationSummary,
+  formatIndicatorScore,
   injectAuthoritativeScoresSection,
   parseSubdimensionScore,
+  parseSubdimensionScoreFromNamedSection,
   subdimensionScoreKey,
 } from "@/lib/evaluation-scores";
+import { mergeAuthoritativeScores } from "@/lib/evaluation-scores-json";
 import {
-  extractSubdimensionScoresViaJson,
-  mergeAuthoritativeScores,
-} from "@/lib/evaluation-scores-json";
-import {
-  parseRubricDimensions,
-  parseRubricSubdimensions,
-  summarizeProjectForRag,
   type RubricDimension,
   type RubricSubdimension,
 } from "@/lib/rubric-dimensions";
+import { buildSubdimensionKnowledgeQuery } from "@/lib/evaluate-rag-query";
+import {
+  buildRubricScoreSchemaFromConfig,
+  isRubricConfigValid,
+  mergeRubricConfig,
+  subdimensionEvalContent,
+  type RubricConfigPonderaciones,
+} from "@/lib/rubric-config";
+import type { RetrievedChunk } from "@/lib/chunk-types";
+import { createEmptyArtifacts } from "@/lib/agent-tools";
 
 export type EvaluateStreamEvent =
   | { type: "step"; message: string }
@@ -55,57 +64,46 @@ export type EvaluateStreamEvent =
       overallScore: number | null;
     }
   | { type: "evaluation_summary"; text: string }
+  | { type: "assigned_level"; level: number | null; title: string }
   | { type: "report_content"; content: string }
   | { type: "formatting"; message: string }
   | { type: "content"; chunk: string }
   | { type: "done" }
   | { type: "error"; error: string };
 
-function lengthInstruction(maxChars: number): string {
-  const { min, max } = charRange(maxChars);
-  return `Longitud objetivo: entre ${min} y ${max} caracteres. NO escribas la cantidad de caracteres en tu respuesta.`;
-}
-
-function dimensionOverviewPrompt(dimension: RubricDimension, overviewChars: number): string {
-  return `Realiza un análisis breve y general del proyecto para la dimensión "${dimension.name}".
-
-Usa ÚNICAMENTE:
-- Los elementos identificados del proyecto en "Documentos del proyecto a evaluar".
-- Los fragmentos del Manual de referencia (Knowledge) incluidos en el contexto.
-- Los criterios generales de la dimensión en "Enfoque de esta evaluación parcial".
-
-IMPORTANTE:
-- Este paso es solo el análisis breve de la dimensión (visión general).
-- NO evalúes aún las subdimensiones individualmente ni asignes notas por subcriterio.
-- ${lengthInstruction(overviewChars)}
-- No uses etiquetas <think>.
-- Responde solo con el análisis breve de esta dimensión, sin introducciones genéricas.`.trim();
-}
-
 function subdimensionUserPrompt(
   dimension: RubricDimension,
   subdimension: RubricSubdimension,
-  fieldLimits: SubdimensionFieldLimits
+  scoreScale: { min: number; max: number },
+  evaluation: EvaluationConfig,
+  phaseInstructions: string
 ): string {
-  const a = charRange(fieldLimits.analysis);
-  const j = charRange(fieldLimits.justification);
-  const m = charRange(fieldLimits.improvements);
+  const label = evaluation.knowledgeReferenceLabel;
+  const scoreExamples = Array.from(
+    { length: scoreScale.max - scoreScale.min + 1 },
+    (_, i) => scoreScale.min + i
+  ).join(", ");
 
   return `Evalúa la subdimensión "${subdimension.name}" dentro de la dimensión "${dimension.name}".
 
+Metodología:
+1. Interpreta los criterios de la subdimensión y qué conlleva cada nota (${scoreExamples}).
+2. Localiza en los elementos del proyecto la información que se refiere a "${subdimension.name}".
+3. Con el marco teórico de ${label} (Knowledge), asigna la nota y redacta análisis, justificación y mejoras.
+
 Usa ÚNICAMENTE:
 - Los elementos identificados del proyecto en "Documentos del proyecto a evaluar".
-- Los fragmentos del Manual de referencia (Knowledge) incluidos en el contexto.
+- Los fragmentos de ${label} (Knowledge) incluidos en el contexto.
 - Los criterios de la subdimensión en "Enfoque de esta evaluación parcial".
 
-Incluye estas secciones con las longitudes indicadas (son instrucciones internas; NO las menciones en el texto):
-1. **Análisis** — entre ${a.min} y ${a.max} caracteres
+Incluye obligatoriamente estas secciones (sin límite de caracteres; sé técnico y exhaustivo):
+1. **Análisis** — evaluación rigurosa del proyecto según los criterios
 2. **Nota** — OBLIGATORIO e INNEGOCIABLE:
    - Una línea exacta con el formato: Nota: N
-   - N debe ser un único dígito: 1, 2, 3 o 4 (número arábigo, no palabras)
+   - N debe ser un único dígito: ${scoreExamples} (número arábigo, no palabras)
    - Prohibido omitir la nota, usar rangos, decimales o frases como "nota alta"
-3. **Justificación** — entre ${j.min} y ${j.max} caracteres
-4. **Posibles mejoras** — entre ${m.min} y ${m.max} caracteres
+3. **Justificación** — fundamentada en el Knowledge y la evidencia del proyecto
+4. **Posibles mejoras** — propuestas concretas y accionables
 
 La línea "Nota: N" debe aparecer en su propia línea, después del Análisis y antes de la Justificación.
 Ejemplo válido:
@@ -117,66 +115,86 @@ Nota: 3
 **Justificación**
 (texto)
 
-Si el contenido queda corto, amplía con detalle del proyecto y del marco teórico sin inventar hechos.
+Profundiza con detalle técnico del proyecto y del marco teórico sin inventar hechos.
+${
+  phaseInstructions.trim()
+    ? `\n\nOrientación adicional para esta evaluación:\n${phaseInstructions.trim()}`
+    : ""
+}
 
 No uses etiquetas <think>. Responde solo con la evaluación de esta subdimensión.`.trim();
 }
 
 async function collectStream(
   messages: { role: "system" | "user" | "assistant"; content: string }[],
-  maxTokens: number
+  maxTokens: number,
+  semaphore?: EvaluateLlmSemaphore
 ): Promise<string> {
-  let out = "";
-  for await (const chunk of streamChat(messages, { max_tokens: maxTokens, useCase: "evaluate" })) {
-    out += chunk;
-  }
-  return out;
+  const run = async () => {
+    let out = "";
+    for await (const chunk of streamChat(messages, { max_tokens: maxTokens, useCase: "evaluate" })) {
+      out += chunk;
+    }
+    return out;
+  };
+  return semaphore ? semaphore.run(run) : run();
 }
 
 type RagLlmPassParams = {
   evaluationTypeId: number;
   projectElementsTable: { element: string; content: string }[];
   ragQuery: string;
-  evaluateDimension?: RubricDimension;
   evaluateSubdimension?: { dimensionName: string; name: string; content: string };
   userPrompt: string;
   maxTokens: number;
+  knowledgeLabel: string;
+  semaphore: EvaluateLlmSemaphore;
+  precomputedKnowledgeChunks?: RetrievedChunk[];
 };
 
 async function runRagLlmPass(params: RagLlmPassParams): Promise<string> {
-  const systemContent = await buildSystemContext(params.evaluationTypeId, [], {
-    projectElementsTable: params.projectElementsTable,
-    projectElementsOnly: true,
-    excludeReportFormat: true,
-    contextMode: "evaluate",
-    ragQuery: params.ragQuery,
-    evaluateDimension: params.evaluateDimension,
-    evaluateSubdimension: params.evaluateSubdimension,
+  return params.semaphore.run(async () => {
+    const systemContent = await buildSystemContext(params.evaluationTypeId, [], {
+      projectElementsTable: params.projectElementsTable,
+      projectElementsOnly: true,
+      excludeReportFormat: true,
+      contextMode: "evaluate",
+      ragQuery: params.ragQuery,
+      evaluateSubdimension: params.evaluateSubdimension,
+      agentArtifacts: params.precomputedKnowledgeChunks?.length
+        ? { ...createEmptyArtifacts(), knowledgeChunks: params.precomputedKnowledgeChunks }
+        : undefined,
+    });
+
+    const noThink =
+      "Responde solo con el análisis de evaluación. No uses etiquetas <think>.\n\n";
+    const systemMessage =
+      noThink +
+      (systemContent ||
+        `Eres un evaluador de proyectos. Fundamenta el análisis en la rúbrica y ${params.knowledgeLabel}.`);
+
+    return collectStream(
+      [
+        { role: "system", content: systemMessage },
+        { role: "user", content: params.userPrompt },
+      ],
+      params.maxTokens
+    );
   });
-
-  const noThink =
-    "Responde solo con el análisis de evaluación. No uses etiquetas <think>.\n\n";
-  const systemMessage =
-    noThink +
-    (systemContent ||
-      "Eres un evaluador de proyectos. Fundamenta el análisis en la rúbrica y el Manual de referencia.");
-
-  return collectStream(
-    [
-      { role: "system", content: systemMessage },
-      { role: "user", content: params.userPrompt },
-    ],
-    params.maxTokens
-  );
 }
 
-function evaluationSummaryPrompt(overallScore: number | null): string {
-  return `Redacta una SÍNTESIS FINAL DE LA EVALUACIÓN (máximo 300 caracteres).
+function evaluationSummaryPrompt(
+  overallScore: number | null,
+  evaluation: EvaluationConfig,
+  summaryMaxChars: number
+): string {
+  const label = evaluation.indicatorLabel;
+  return `Redacta una SÍNTESIS FINAL DE LA EVALUACIÓN (máximo ${summaryMaxChars} caracteres).
 
 REGLAS OBLIGATORIAS:
 - NO describas el proyecto, su objetivo, beneficiarios ni actividades.
-- Resume el VEREDICTO evaluativo según la rúbrica IGIP: hallazgos evaluativos y conclusión.
-${overallScore != null ? `- Incluye la nota IGIP ponderada: ${overallScore}.` : "- Si puedes inferir la conclusión global, hazlo sin inventar una nota numérica."}
+- Resume el VEREDICTO evaluativo según la rúbrica ${label}: hallazgos evaluativos y conclusión.
+${overallScore != null ? `- Incluye la nota ${label} ponderada: ${formatIndicatorScore(overallScore)}.` : "- Si puedes inferir la conclusión global, hazlo sin inventar una nota numérica."}
 - Español claro, sin títulos, sin listas, sin markdown.
 - Solo el texto de la síntesis evaluativa.`.trim();
 }
@@ -184,66 +202,190 @@ ${overallScore != null ? `- Incluye la nota IGIP ponderada: ${overallScore}.` : 
 async function generateEvaluationSummaryText(
   summaryInput: string,
   overallScore: number | null,
-  schema: ReturnType<typeof buildRubricScoreSchema>,
-  scores: Record<string, number | null>
+  schema: ReturnType<typeof buildRubricScoreSchemaFromConfig>,
+  scores: Record<string, number | null>,
+  evaluation: EvaluationConfig,
+  summaryMaxChars: number,
+  maxTokensOverride?: number,
+  semaphore?: EvaluateLlmSemaphore
 ): Promise<string> {
+  const defaultSystem = `Eres evaluador ${evaluation.indicatorLabel}. Escribes síntesis evaluativas concisas. NUNCA describas el proyecto, sus objetivos ni actividades. Solo veredicto evaluativo.`;
   let llmText = "";
+  const maxTokens = maxTokensOverride ?? evaluation.maxTokens.summary;
   try {
     llmText = await collectStream(
       [
-        {
-          role: "system",
-          content:
-            "Eres evaluador IGIP. Escribes síntesis evaluativas concisas. NUNCA describas el proyecto, sus objetivos ni actividades. Solo veredicto evaluativo.",
-        },
+        { role: "system", content: defaultSystem },
         {
           role: "user",
-          content: `${evaluationSummaryPrompt(overallScore)}\n\nDatos de evaluación (solo notas y conclusiones):\n${summaryInput.slice(0, 6000)}`,
+          content: `${evaluationSummaryPrompt(overallScore, evaluation, summaryMaxChars)}\n\nDatos de evaluación (solo notas y conclusiones):\n${summaryInput.slice(0, 6000)}`,
         },
       ],
-      600
+      maxTokens,
+      semaphore
     );
   } catch {
     llmText = "";
   }
-  return finalizeEvaluationSummary(llmText, schema, scores, overallScore);
+  return finalizeEvaluationSummary(
+    llmText,
+    schema,
+    scores,
+    overallScore,
+    evaluation.indicatorLabel,
+    summaryMaxChars
+  );
 }
 
-function buildFormatSystemPrompt(
-  reportFormat: string,
-  rawEvaluation: string,
-  limits: ReportFormatLimits
-): string {
-  return `Tu tarea es reorganizar el siguiente contenido de evaluación (análisis por dimensiones y subdimensiones) para presentarlo según la estructura y formato indicados.
+type SubdimResult = {
+  j: number;
+  sub: RubricSubdimension;
+  subAnalysis: string;
+  parsedScore: number | null;
+};
 
-## Formato que debe tener el informe final
+type DimensionEvalContext = {
+  evaluationTypeId: number;
+  projectElementsTable: { element: string; content: string }[];
+  rubric: RubricConfigPonderaciones;
+  reportFormat: ReportFormatConfig;
+  evaluation: EvaluationConfig;
+  scoreScale: { min: number; max: number };
+  topN: number;
+  phase: EvaluationConfig["phaseInstructions"];
+  totalDimensions: number;
+  semaphore: EvaluateLlmSemaphore;
+  precomputedSubdimensionChunks?: Record<string, RetrievedChunk[]>;
+};
 
-${reportFormat}
+type DimensionEvalResult = {
+  index: number;
+  dimText: string;
+  subdimensionScores: Record<string, number | null>;
+  events: EvaluateStreamEvent[];
+};
 
-## Tabla de longitudes (instrucción interna — NO imprimir en el informe)
+async function evaluateSingleDimension(
+  index: number,
+  dimConfig: RubricConfigPonderaciones["dimensions"][0],
+  ctx: DimensionEvalContext,
+  onEvent?: (event: EvaluateStreamEvent) => void
+): Promise<DimensionEvalResult> {
+  const events: EvaluateStreamEvent[] = [];
+  const emit = (event: EvaluateStreamEvent) => {
+    events.push(event);
+    onEvent?.(event);
+  };
 
-${formatLimitsTable(limits)}
+  const dim: RubricDimension = {
+    name: dimConfig.name,
+    content: dimConfig.subdimensions
+      .map((s) => subdimensionEvalContent(dimConfig, s))
+      .join("\n\n"),
+  };
+  const subdims: RubricSubdimension[] = dimConfig.subdimensions.map((s) => ({
+    name: s.name,
+    content: subdimensionEvalContent(dimConfig, s),
+  }));
 
-## Contenido de evaluación a reorganizar
+  if (subdims.length > 0) {
+    emit({
+      type: "step",
+      message: `Evaluando ${subdims.length} subdimensión(es) de ${dim.name} (${ctx.evaluation.parallelSubdimensions ? "en paralelo" : "secuencial"})…`,
+    });
+  }
 
-${rawEvaluation}
+  const runSubdim = async (
+    sub: RubricSubdimension,
+    j: number,
+    subConfig: RubricConfigPonderaciones["dimensions"][0]["subdimensions"][0]
+  ): Promise<SubdimResult> => {
+    const subQuery = buildSubdimensionKnowledgeQuery(dim, sub, ctx.projectElementsTable, ctx.topN);
+    const scoreKey = subdimensionScoreKey(dim.name, sub.name);
+    const subAnalysis = await runRagLlmPass({
+      evaluationTypeId: ctx.evaluationTypeId,
+      projectElementsTable: ctx.projectElementsTable,
+      ragQuery: subQuery,
+      evaluateSubdimension: {
+        dimensionName: dim.name,
+        name: sub.name,
+        content: sub.content,
+      },
+      userPrompt: subdimensionUserPrompt(
+        dim,
+        sub,
+        ctx.scoreScale,
+        ctx.evaluation,
+        ctx.phase.subdimensionEval
+      ),
+      maxTokens: ctx.evaluation.maxTokens.subdimension,
+      knowledgeLabel: ctx.evaluation.knowledgeReferenceLabel,
+      semaphore: ctx.semaphore,
+      precomputedKnowledgeChunks: ctx.precomputedSubdimensionChunks?.[scoreKey],
+    });
+    return {
+      j,
+      sub,
+      subAnalysis,
+      parsedScore: parseSubdimensionScore(subAnalysis),
+    };
+  };
 
-Instrucciones:
-- Presenta el contenido siguiendo las secciones y el orden del formato.
-- Los números de caracteres son restricciones INTERNAS. PROHIBIDO incluir en el informe textos como "(500 caracteres)", "~500 caracteres", "1000 caracteres" o similares en títulos, subtítulos o cuerpo.
-- Usa títulos limpios (ej. "2.1 Subdimensión Grado de originalidad de la idea", "Análisis", "Justificación", "Posibles mejoras") sin anotar longitudes.
-- Cada bloque de texto debe acercarse a su longitud objetivo (entre 90% y 100% del límite). Si el análisis fuente es más corto, amplíalo con el mismo contenido ya evaluado; si es más largo, condensa sin perder la conclusión ni la nota.
-- No inventes hechos nuevos sobre el proyecto; usa solo el texto del análisis.
-- No uses etiquetas <think>. Responde únicamente con el informe ya formateado.`;
+  const subdimResults = ctx.evaluation.parallelSubdimensions
+    ? await Promise.all(
+        subdims.map((sub, j) => runSubdim(sub, j, dimConfig.subdimensions[j]))
+      )
+    : await (async () => {
+        const out: SubdimResult[] = [];
+        for (let j = 0; j < subdims.length; j++) {
+          out.push(await runSubdim(subdims[j], j, dimConfig.subdimensions[j]));
+        }
+        return out;
+      })();
+
+  subdimResults.sort((a, b) => a.j - b.j);
+
+  const subdimensionScores: Record<string, number | null> = {};
+
+  for (const result of subdimResults) {
+    const scoreKey = subdimensionScoreKey(dim.name, result.sub.name);
+    subdimensionScores[scoreKey] = result.parsedScore;
+    emit({
+      type: "subdimension",
+      dimension: dim.name,
+      name: result.sub.name,
+      index: result.j + 1,
+      total: subdims.length,
+    });
+  }
+
+  const dimSections: string[] = [
+    `## Dimensión: ${dim.name}`,
+    ...subdimResults.map(
+      (result) => `### Subdimensión: ${result.sub.name}\n\n${result.subAnalysis.trim()}`
+    ),
+  ];
+
+  emit({
+    type: "dimension",
+    name: dim.name,
+    index: index + 1,
+    total: ctx.totalDimensions,
+  });
+
+  return {
+    index,
+    dimText: dimSections.join("\n\n"),
+    subdimensionScores,
+    events,
+  };
 }
 
-/**
- * Evaluación multi-nivel: RAG+LLM por análisis breve de dimensión y por cada subdimensión.
- */
+/** Evaluación por ponderaciones: RAG+LLM por subdimensión; resumen macro en formateo §6. */
 export async function* runEvaluatePipeline(
   evaluationTypeId: number,
   projectElementsTable: { element: string; content: string }[],
-  reportFormat: string
+  options?: { precomputedSubdimensionChunks?: Record<string, RetrievedChunk[]> }
 ): AsyncGenerator<EvaluateStreamEvent, void, unknown> {
   const config = await getConfig(evaluationTypeId);
   if (!config) {
@@ -251,182 +393,153 @@ export async function* runEvaluatePipeline(
     return;
   }
 
-  const rubricText = (config.rubric_prompt ?? "").trim();
-  const dimensions = parseRubricDimensions(rubricText);
-  const scoreSchema = buildRubricScoreSchema(rubricText);
-  const subdimensionScores: Record<string, number | null> = {};
-  const formatLimits = parseReportFormatLimits(reportFormat);
-  const projectSummary = summarizeProjectForRag(projectElementsTable);
-  const partialAnalyses: string[] = [];
-
-  const totalSubdims = dimensions.reduce(
-    (n, d) => n + parseRubricSubdimensions(d.content).length,
-    0
+  const typeRow = await getEvaluationTypeByIdPostgres(evaluationTypeId);
+  const rubric = mergeRubricConfig(JSON.parse(config.rubric_config || "{}"), typeRow?.name);
+  const evaluation = await getEvaluationConfig(evaluationTypeId);
+  const reportFormat = enrichReportFormatWithLegacySections(
+    mergeReportFormatConfig(
+      JSON.parse(config.report_format_config || "{}"),
+      rubric
+    ),
+    rubric,
+    (config.report_format ?? "").trim()
   );
+
+  if (rubric.type !== "ponderaciones" || !isRubricConfigValid(rubric)) {
+    yield { type: "error", error: "Rúbrica por ponderaciones no configurada correctamente" };
+    return;
+  }
+  if (!isReportFormatValid(reportFormat, rubric)) {
+    yield { type: "error", error: "Formato de informe (§6) incompleto" };
+    return;
+  }
+
+  const scoreScale = rubric.scoreScale;
+  const synthesisMax = getSynthesisMaxChars(reportFormat, rubric);
+  const topN = evaluation.projectElementsInRagQuery;
+  const phase = evaluation.phaseInstructions;
+  const scoreSchema = buildRubricScoreSchemaFromConfig(rubric);
+  const subdimensionScores: Record<string, number | null> = {};
+  const partialAnalyses: string[] = [];
+  const semaphore = new EvaluateLlmSemaphore();
+
+  const totalSubdims = rubric.dimensions.reduce((n, d) => n + d.subdimensions.length, 0);
 
   yield {
     type: "step",
-    message: `Evaluando proyecto: ${dimensions.length} dimensión(es), ${totalSubdims} subdimensión(es), con documentación de referencia…`,
+    message: `Evaluando proyecto: ${rubric.dimensions.length} dimensión(es), ${totalSubdims} subdimensión(es), con documentación de referencia…`,
   };
 
-  for (let i = 0; i < dimensions.length; i++) {
-    const dim = dimensions[i];
-    const dimLimits = findDimensionLimits(formatLimits, dim.name);
-    const overviewChars = dimLimits?.overview ?? 500;
-    const subdims = parseRubricSubdimensions(dim.content);
-    const dimSections: string[] = [`## Dimensión: ${dim.name}`];
+  const dimCtx: DimensionEvalContext = {
+    evaluationTypeId,
+    projectElementsTable,
+    rubric,
+    reportFormat,
+    evaluation,
+    scoreScale,
+    topN,
+    phase,
+    totalDimensions: rubric.dimensions.length,
+    semaphore,
+    precomputedSubdimensionChunks: options?.precomputedSubdimensionChunks,
+  };
 
-    yield {
-      type: "step",
-      message: `Análisis breve — dimensión ${i + 1}/${dimensions.length}: ${dim.name}…`,
+  if (evaluation.parallelDimensions && rubric.dimensions.length > 1) {
+    const eventQueue: EvaluateStreamEvent[] = [];
+    let notify: (() => void) | null = null;
+
+    const onEvent = (event: EvaluateStreamEvent) => {
+      eventQueue.push(event);
+      notify?.();
+      notify = null;
     };
 
-    const overviewQuery = [
-      dim.name,
-      "análisis general dimensión evaluación innovación",
-      dim.content.slice(0, 400),
-      "Manual Oslo innovación marco teórico",
-      projectSummary.slice(0, 600),
-    ].join(" ");
+    const waitForEvent = () =>
+      new Promise<void>((resolve) => {
+        if (eventQueue.length > 0) resolve();
+        else notify = resolve;
+      });
 
-    const overview = await runRagLlmPass({
-      evaluationTypeId,
-      projectElementsTable,
-      ragQuery: overviewQuery,
-      evaluateDimension: dim,
-      userPrompt: dimensionOverviewPrompt(dim, overviewChars),
-      maxTokens: 4000,
-    });
-
-    dimSections.push(`### Análisis breve\n\n${overview.trim()}`);
-    yield { type: "dimension", name: dim.name, index: i + 1, total: dimensions.length };
-
-    if (subdims.length > 0) {
-      yield {
-        type: "step",
-        message: `Evaluando ${subdims.length} subdimensión(es) de ${dim.name} en paralelo…`,
-      };
-    }
-
-    type SubdimResult = {
-      j: number;
-      sub: RubricSubdimension;
-      subAnalysis: string;
-      parsedScore: number | null;
-    };
-
-    const subdimResults = await Promise.all(
-      subdims.map(async (sub, j): Promise<SubdimResult> => {
-        const fieldLimits =
-          findSubdimensionLimits(formatLimits, dim.name, sub.name) ?? {
-            analysis: 500,
-            justification: 500,
-            improvements: 500,
-          };
-
-        const subQuery = [
-          dim.name,
-          sub.name,
-          sub.content.slice(0, 800),
-          "Manual Oslo innovación evaluación justificación mejoras",
-          projectSummary.slice(0, 600),
-        ].join(" ");
-
-        const subAnalysis = await runRagLlmPass({
-          evaluationTypeId,
-          projectElementsTable,
-          ragQuery: subQuery,
-          evaluateSubdimension: {
-            dimensionName: dim.name,
-            name: sub.name,
-            content: sub.content,
-          },
-          userPrompt: subdimensionUserPrompt(dim, sub, fieldLimits),
-          maxTokens: 8000,
-        });
-
-        return {
-          j,
-          sub,
-          subAnalysis,
-          parsedScore: parseSubdimensionScore(subAnalysis),
-        };
-      })
+    const allDone = Promise.all(
+      rubric.dimensions.map((dimConfig, i) =>
+        evaluateSingleDimension(i, dimConfig, dimCtx, onEvent)
+      )
     );
 
-    subdimResults.sort((a, b) => a.j - b.j);
-
-    for (const result of subdimResults) {
-      dimSections.push(
-        `### Subdimensión: ${result.sub.name}\n\n${result.subAnalysis.trim()}`
-      );
-
-      const scoreKey = subdimensionScoreKey(dim.name, result.sub.name);
-      subdimensionScores[scoreKey] = result.parsedScore;
-
-      yield {
-        type: "subdimension",
-        dimension: dim.name,
-        name: result.sub.name,
-        index: result.j + 1,
-        total: subdims.length,
-      };
+    while (true) {
+      while (eventQueue.length > 0) {
+        yield eventQueue.shift()!;
+      }
+      const race = await Promise.race([
+        allDone.then(() => "done" as const),
+        waitForEvent().then(() => "event" as const),
+      ]);
+      if (race === "done") {
+        while (eventQueue.length > 0) {
+          yield eventQueue.shift()!;
+        }
+        break;
+      }
     }
 
-    partialAnalyses.push(dimSections.join("\n\n"));
+    const dimensionResults = await allDone;
+    dimensionResults.sort((a, b) => a.index - b.index);
+    for (const result of dimensionResults) {
+      partialAnalyses.push(result.dimText);
+      Object.assign(subdimensionScores, result.subdimensionScores);
+    }
+  } else {
+    for (let i = 0; i < rubric.dimensions.length; i++) {
+      const result = await evaluateSingleDimension(i, rubric.dimensions[i], dimCtx);
+      for (const event of result.events) {
+        yield event;
+      }
+      partialAnalyses.push(result.dimText);
+      Object.assign(subdimensionScores, result.subdimensionScores);
+    }
   }
 
   const rawEvaluation = partialAnalyses.join("\n\n---\n\n");
 
   yield {
     type: "formatting",
-    message: "Integrando análisis y organizando informe según formato…",
+    message: "Redactando resúmenes e integrando evaluación según formato…",
   };
 
-  const formatSystem = buildFormatSystemPrompt(reportFormat, rawEvaluation, formatLimits);
+  const formatCustom = evaluation.prompts.formatInstructions?.trim();
 
-  let formatted = "";
-  for await (const chunk of streamChat(
-    [
-      { role: "system", content: formatSystem },
-      {
-        role: "user",
-        content:
-          "Reorganiza el contenido según el formato. No incluyas anotaciones de cantidad de caracteres en el informe. Ajusta cada sección a su longitud objetivo. Responde solo con el informe formateado.",
-      },
-    ],
-    { max_tokens: 8192, useCase: "evaluate" }
-  )) {
-    formatted += chunk;
-    if (chunk) {
-      yield { type: "content", chunk };
-    }
-  }
-
-  const sanitized = stripCharacterLimitAnnotations(formatted);
-
-  yield {
-    type: "step",
-    message: "Extrayendo notas estructuradas (JSON) desde los análisis…",
-  };
-
-  const jsonScores = await extractSubdimensionScoresViaJson(
-    scoreSchema,
+  const assembled = await collectAssembledReport({
+    rubric,
+    reportFormat,
     rawEvaluation,
-    (messages) =>
-      chatCompletion(messages, { max_tokens: 1024, temperature: 0.1, useCase: "evaluate" })
-  );
+    projectElementsTable,
+    evaluation,
+    formatInstructionsExtra: formatCustom,
+    semaphore,
+  });
+
+  let sanitized = stripCharacterLimitAnnotations(assembled);
 
   const regexBackfill = backfillSubdimensionScores(scoreSchema, {}, [
     rawEvaluation,
     sanitized,
   ]);
 
+  const rawDeterministicScores: Record<string, number | null> = {};
+  for (const entry of scoreSchema) {
+    rawDeterministicScores[entry.key] = parseSubdimensionScoreFromNamedSection(
+      rawEvaluation,
+      entry.dimension,
+      entry.name
+    );
+  }
+
   Object.assign(
     subdimensionScores,
-    mergeAuthoritativeScores(scoreSchema, jsonScores, [
-      regexBackfill,
+    mergeAuthoritativeScores(scoreSchema, {}, [
       subdimensionScores,
+      rawDeterministicScores,
+      regexBackfill,
     ])
   );
 
@@ -442,29 +555,54 @@ export async function* runEvaluatePipeline(
 
   const overallScore = computeWeightedIndicatorScore(scoreSchema, subdimensionScores);
 
-  yield {
-    type: "step",
-    message: "Generando síntesis evaluativa final…",
-  };
+  if (synthesisMax != null && synthesisMax > 0) {
+    yield {
+      type: "step",
+      message: "Generando síntesis evaluativa final…",
+    };
 
-  const summaryInput = buildEvaluationInputForSummary(
-    rawEvaluation,
-    sanitized,
-    scoreSchema,
-    subdimensionScores
-  );
-  const evaluationSummary = await generateEvaluationSummaryText(
-    summaryInput,
-    overallScore,
-    scoreSchema,
-    subdimensionScores
-  );
+    const summaryInput = buildEvaluationInputForSummary(
+      rawEvaluation,
+      sanitized,
+      scoreSchema,
+      subdimensionScores
+    );
+    const synSection = findCustomSectionByTitlePattern(
+      reportFormat,
+      /síntesis|sintesis/i
+    );
+    const evaluationSummary = synSection
+      ? await generateFinalSynthesisSection({
+          synSection,
+          rubric,
+          evaluation,
+          rawEvaluation,
+          scoreSchema,
+          subdimensionScores,
+          overallScore,
+          semaphore,
+        })
+      : await generateEvaluationSummaryText(
+          summaryInput,
+          overallScore,
+          scoreSchema,
+          subdimensionScores,
+          evaluation,
+          synthesisMax,
+          evaluation.maxTokens.summary,
+          semaphore
+        );
+    yield { type: "evaluation_summary", text: evaluationSummary.replace(/^##\s*[^\n]+\n+/, "").trim() };
+
+    sanitized = `${sanitized.trimEnd()}\n\n${evaluationSummary.trim()}`;
+  }
 
   const finalReport = injectAuthoritativeScoresSection(
     sanitized,
     scoreSchema,
     subdimensionScores,
-    overallScore
+    overallScore,
+    evaluation.indicatorLabel
   );
   yield { type: "report_content", content: finalReport };
 
@@ -473,7 +611,6 @@ export async function* runEvaluatePipeline(
     subdimensionScores: { ...subdimensionScores },
     overallScore,
   };
-  yield { type: "evaluation_summary", text: evaluationSummary };
 
   yield { type: "done" };
 }

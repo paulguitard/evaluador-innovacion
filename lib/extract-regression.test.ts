@@ -18,7 +18,8 @@ import { tryDeterministicExtract } from "@/lib/project-extract-hybrid";
 import { extractElementHeuristic } from "@/lib/excel-heuristics";
 import { getIndicatorsSheetContext } from "@/lib/indicators-extract";
 import { extractGanttActivitiesFromExcel, getGanttSheetContext } from "@/lib/gantt-extract";
-import { isGanttActivitiesElement } from "@/lib/sheet-element-routing";
+import { isGanttActivitiesElement, sheetsForElement, isGanttSheetName } from "@/lib/sheet-element-routing";
+import { mergeEvaluationTypeSettings } from "@/lib/evaluation-type-settings";
 import { conenergiaTrlFixture } from "@/lib/extract-fixtures/conenergia-trl.fixture";
 import { IGIP_ELEMENT_DEFS } from "@/lib/extract-fixtures/igip-elements";
 import {
@@ -27,6 +28,12 @@ import {
   untestedMatrixRows,
 } from "@/lib/extract-verification-matrix";
 import { PDF_FORM_SNIPPET, DOCX_FORM_SNIPPET } from "@/lib/extract-fixtures/plain-text-snippets";
+import {
+  imetDocuCoreFixture,
+  IMET_DOCUCORE_GOLDEN,
+  IMET_ELEMENT_DEFS,
+} from "@/lib/extract-fixtures/imet-docucore.fixture";
+import { isQaColumnWorkbook } from "@/lib/qa-column-extract";
 import { projectIndexMatches, saveProjectChunks } from "@/lib/project-vector-store";
 import { saveProjectStructuredIndex } from "@/lib/project-structured-index";
 import path from "path";
@@ -394,9 +401,88 @@ describe("CONenergía TRL — campos ampliados", () => {
   });
 });
 
+describe("extract_config genérico TRL", () => {
+  it("enruta hojas con sheetPatterns personalizados", () => {
+    const trlPatterns = {
+      gantt: "cronograma|timeline",
+      indicators: "metric|kpi",
+      resumen: "overview|summary",
+    };
+    const sheets = [
+      { sheetName: "Project Overview", cells: [], merges: [] },
+      { sheetName: "Timeline 2025", cells: [], merges: [] },
+    ];
+    const element = {
+      title: "Actividades del proyecto",
+      section: "Cronograma",
+      description: "actividades del proyecto en gantt",
+    };
+    assert.equal(isGanttSheetName("Timeline 2025", trlPatterns), true);
+    assert.equal(isGanttSheetName("Plan de Actividades", trlPatterns), false);
+    const ordered = sheetsForElement(element, sheets, trlPatterns);
+    assert.equal(ordered[0]?.sheetName, "Timeline 2025");
+  });
+
+  it("mergeEvaluationTypeSettings aplica defaults TRL mínimos", () => {
+    const merged = mergeEvaluationTypeSettings(
+      {
+        extract_config: {
+          sheetPatterns: { gantt: "timeline", indicators: "kpi", resumen: "summary" },
+          elementTimeoutMs: 60_000,
+        },
+      },
+      "TRL"
+    );
+    assert.equal(merged.pipeline.indicatorLabel, "TRL");
+    assert.equal(merged.extract.elementTimeoutMs, 60_000);
+    assert.match(merged.extract.sheetPatterns.gantt, /timeline/);
+  });
+});
+
 describe("stripIndexedCellMetadata", () => {
   it("elimina marcadores de chunk RAG", () => {
     const raw = "(fila 21, col 5): La solución propuesta consiste en una página web.";
     assert.equal(stripIndexedCellMetadata(raw), "La solución propuesta consiste en una página web.");
+  });
+});
+
+describe("extract IMET formulario Q/A", () => {
+  it("detecta layout pregunta-respuesta en columna A/B", async () => {
+    const fixture = [await imetDocuCoreFixture()];
+    assert.equal(isQaColumnWorkbook(fixture), true);
+  });
+
+  it("extrae campos IMET desde Excel de dos columnas", async () => {
+    const fixture = [await imetDocuCoreFixture()];
+    const results = extractAllElementsHeuristic(fixture, IMET_ELEMENT_DEFS);
+
+    for (const el of IMET_ELEMENT_DEFS) {
+      const match = results.get(el.title);
+      const golden = IMET_DOCUCORE_GOLDEN[el.title];
+      assert.ok(match?.content, `sin contenido para ${el.title}`);
+      assert.ok(match!.content.length >= golden.minLength, el.title);
+      if (golden.mustMatch) assert.match(match!.content, golden.mustMatch, el.title);
+      if (golden.mustNotMatch) assert.doesNotMatch(match!.content, golden.mustNotMatch, el.title);
+    }
+  });
+
+  it("tryDeterministicExtract resuelve nombre y avance sin LLM", async () => {
+    const fixture = [await imetDocuCoreFixture()];
+
+    const name = tryDeterministicExtract(fixture, {
+      title: "Nombre del proyecto",
+      description: "Nombre del emprendimiento",
+    });
+    assert.ok(name?.content);
+    assert.match(name!.content, /DocuCore/i);
+
+    const advance = tryDeterministicExtract(fixture, {
+      title: "Avance actual",
+      description: "Estado de avance del proyecto",
+      section: "Desarrollo Técnico",
+    });
+    assert.ok(advance?.content);
+    assert.match(advance!.content, /prototipo|plataforma funcional/i);
+    assert.match(advance!.method, /qa_column|form_row/);
   });
 });

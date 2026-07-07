@@ -112,25 +112,32 @@ function buildSchemaListForPrompt(schema: RubricScoreSchemaEntry[]): string {
 
 export function buildScoresExtractionMessages(
   schema: RubricScoreSchemaEntry[],
-  rawEvaluation: string
+  rawEvaluation: string,
+  options?: { indicatorLabel?: string; scoreJsonSystem?: string; scoreMin?: number; scoreMax?: number }
 ): { role: "system" | "user"; content: string }[] {
+  const label = options?.indicatorLabel ?? "IGIP";
+  const min = options?.scoreMin ?? 1;
+  const max = options?.scoreMax ?? 4;
   const keysExample = schema
     .slice(0, 2)
     .map((e) => `    "${e.key}": 3`)
     .join(",\n");
 
-  return [
-    {
-      role: "system",
-      content: `Eres un extractor de notas de evaluación IGIP. Tu única tarea es leer los análisis por subdimensión y devolver un JSON con la nota numérica asignada (1, 2, 3 o 4) a cada subdimensión.
+  const defaultSystem = `Eres un extractor de notas de evaluación ${label}. Tu única tarea es leer los análisis por subdimensión y devolver un JSON con la nota numérica asignada (${min} a ${max}) a cada subdimensión.
 
 REGLAS:
 - Responde ÚNICAMENTE con JSON válido, sin markdown ni texto adicional.
 - Usa exactamente las claves indicadas en "subdimensionScores".
-- Cada valor debe ser un entero 1, 2, 3 o 4.
+- Cada valor debe ser un entero entre ${min} y ${max}.
 - Extrae la nota del veredicto evaluativo en cada bloque "### Subdimensión:"; no inventes notas.
-- Si el texto menciona "Nota: N", usa ese valor.
-- Si hay ambigüedad, infiere la nota más coherente con el análisis y la justificación.`,
+- La nota asignada es la línea "Nota: N" (o **Nota** seguida de N) dentro del análisis del evaluador.
+- IGNORA las líneas de criterio de rúbrica con formato "- Nota N: descripción..."; esas describen la escala, NO la nota asignada al proyecto.
+- Si hay ambigüedad, infiere la nota más coherente con el análisis y la justificación del evaluador.`;
+
+  return [
+    {
+      role: "system",
+      content: options?.scoreJsonSystem?.trim() || defaultSystem,
     },
     {
       role: "user",
@@ -154,7 +161,8 @@ export function buildScoresExtractionRetryMessages(
   schema: RubricScoreSchemaEntry[],
   rawEvaluation: string,
   missingKeys: string[],
-  partial: Record<string, number | null>
+  partial: Record<string, number | null>,
+  indicatorLabel = "IGIP"
 ): { role: "system" | "user"; content: string }[] {
   const missingList = missingKeys
     .map((key) => {
@@ -172,7 +180,7 @@ export function buildScoresExtractionRetryMessages(
     {
       role: "system",
       content:
-        "Completa el JSON de notas IGIP. Responde SOLO JSON válido con TODAS las claves en subdimensionScores.",
+        `Completa el JSON de notas ${indicatorLabel}. Responde SOLO JSON válido con TODAS las claves en subdimensionScores.`,
     },
     {
       role: "user",
@@ -202,18 +210,20 @@ export type LlmCompleteFn = (
 export async function extractSubdimensionScoresViaJson(
   schema: RubricScoreSchemaEntry[],
   rawEvaluation: string,
-  complete: LlmCompleteFn
+  complete: LlmCompleteFn,
+  options?: { indicatorLabel?: string; scoreJsonSystem?: string; scoreMin?: number; scoreMax?: number }
 ): Promise<Record<string, number | null>> {
   if (schema.length === 0) return {};
 
+  const label = options?.indicatorLabel ?? "IGIP";
   let { scores, missing } = parseScoresJsonPayload(
-    await complete(buildScoresExtractionMessages(schema, rawEvaluation)),
+    await complete(buildScoresExtractionMessages(schema, rawEvaluation, options)),
     schema
   );
 
   if (missing.length > 0) {
     const retryText = await complete(
-      buildScoresExtractionRetryMessages(schema, rawEvaluation, missing, scores)
+      buildScoresExtractionRetryMessages(schema, rawEvaluation, missing, scores, label)
     );
     const retry = parseScoresJsonPayload(retryText, schema);
     scores = { ...scores, ...retry.scores };
@@ -223,7 +233,7 @@ export async function extractSubdimensionScoresViaJson(
   return scores;
 }
 
-/** JSON primero; regex/backfill solo para claves que sigan en null. */
+/** Fuentes en orden de prioridad (fallbacks); jsonScores solo rellena claves aún null. */
 export function mergeAuthoritativeScores(
   schema: RubricScoreSchemaEntry[],
   jsonScores: Record<string, number | null>,
@@ -231,14 +241,15 @@ export function mergeAuthoritativeScores(
 ): Record<string, number | null> {
   const out: Record<string, number | null> = {};
   for (const entry of schema) {
-    let score = jsonScores[entry.key] ?? null;
-    if (score == null) {
-      for (const fb of fallbacks) {
-        if (fb[entry.key] != null) {
-          score = fb[entry.key];
-          break;
-        }
+    let score: number | null = null;
+    for (const fb of fallbacks) {
+      if (fb[entry.key] != null) {
+        score = fb[entry.key];
+        break;
       }
+    }
+    if (score == null) {
+      score = jsonScores[entry.key] ?? null;
     }
     out[entry.key] = score;
   }

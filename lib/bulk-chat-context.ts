@@ -1,5 +1,5 @@
 import type { BulkProjectRow } from "@/hooks/useBulkEvaluation";
-import type { RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
+import { formatIndicatorScore, type RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
 
 const REPORT_EXCERPT_CHARS = 4_500;
 
@@ -28,7 +28,7 @@ export function buildBulkEvaluationChatContext(
     parts.push(`### ${row.projectName}`);
     parts.push(`- Archivo: ${row.fileName}`);
     if (row.overallScore != null) {
-      parts.push(`- Indicador IGIP: ${row.overallScore}`);
+      parts.push(`- Indicador IGIP: ${formatIndicatorScore(row.overallScore)}`);
     }
     const scoreLines = schema
       .map((s) => {

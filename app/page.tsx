@@ -16,7 +16,6 @@ import { useEvaluationConfig } from "@/hooks/useEvaluationConfig";
 import { useProjectExtract } from "@/hooks/useProjectExtract";
 import { useBulkEvaluation } from "@/hooks/useBulkEvaluation";
 import { isIncompleteElement } from "@/lib/project-extract-validate";
-import { buildRubricScoreSchema } from "@/lib/evaluation-scores";
 import { exportBulkResultsExcel, exportBulkResultsZip } from "@/lib/bulk-export";
 
 type EvaluationType = { id: number; name: string };
@@ -64,14 +63,9 @@ export default function Home() {
   const prevActiveTypeIdRef = useRef<number | null>(null);
   const prevEvaluationModeRef = useRef<EvaluationMode>("individual");
 
-  const { elementsWithSection, knowledgeDocNames, rubricPrompt } = useEvaluationConfig(
+  const { elementsWithSection, knowledgeDocNames, scoreSchema } = useEvaluationConfig(
     activeTypeId,
     configOpen
-  );
-
-  const scoreSchema = useMemo(
-    () => buildRubricScoreSchema(rubricPrompt),
-    [rubricPrompt]
   );
 
   const {
@@ -136,19 +130,24 @@ export default function Home() {
   }, [evaluationMode, cancelBulk, resetSessionState]);
 
   useEffect(() => {
+    let cancelled = false;
     fetch("/api/evaluation-types")
       .then((r) => r.json())
       .then((data) => {
+        if (cancelled) return;
         if (Array.isArray(data)) {
           setEvaluationTypes(data);
-          if (data.length > 0 && !activeTypeId) setActiveTypeId(data[0].id);
+          setActiveTypeId((prev) => prev ?? (data.length > 0 ? data[0].id : null));
         } else if (data?.error) {
           console.error("Error cargando tipos de evaluación:", data.error);
         }
       })
       .catch((err) => {
-        console.error("Error cargando tipos de evaluación:", err);
+        if (!cancelled) console.error("Error cargando tipos de evaluación:", err);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [configOpen]);
 
   useEffect(() => {

@@ -240,52 +240,272 @@ export function computeWeightedIndicatorScore(
   return Math.round(weighted * 100) / 100;
 }
 
-/** Formato legible del indicador IGIP (hasta 2 decimales, sin ceros finales). */
+/** Formato del indicador con exactamente 2 decimales (p. ej. 2.60). */
 export function formatIndicatorScore(score: number): string {
   const rounded = Math.round(score * 100) / 100;
-  const fixed = rounded.toFixed(2);
-  if (fixed.endsWith("00")) return String(Math.round(rounded));
-  if (fixed.endsWith("0")) return fixed.slice(0, -1);
-  return fixed;
+  return rounded.toFixed(2);
 }
 
-/** Bloque determinista de notas e índice IGIP para el informe/PDF. */
+function formatSubdimensionScoreLine(entry: RubricScoreSchemaEntry, score: number): string {
+  if (entry.weight != null && entry.weight > 0) {
+    return `${entry.name}: ${score} (ponderación ${entry.weight}%)`;
+  }
+  return `${entry.name}: ${score}`;
+}
+
+/** Bloque determinista de notas e índice del indicador para el informe/PDF. */
 export function buildAuthoritativeScoresSection(
   schema: RubricScoreSchemaEntry[],
   scores: Record<string, number | null>,
-  overallScore: number | null
+  overallScore: number | null,
+  indicatorLabel = "IGIP"
 ): string {
-  const lines = ["**Notas por subdimensión e índice IGIP**", ""];
+  const lines = ["**Notas e índice**", ""];
   for (const entry of schema) {
     const score = scores[entry.key];
-    if (score != null) lines.push(`${entry.name}: ${score}`);
+    if (score != null) lines.push(formatSubdimensionScoreLine(entry, score));
   }
   if (overallScore != null) {
-    lines.push("", `**Índice IGIP**: ${formatIndicatorScore(overallScore)}`);
+    lines.push("", `**Índice ${indicatorLabel}**: ${formatIndicatorScore(overallScore)}`);
   }
   return lines.join("\n");
 }
 
-const SCORES_SECTION_HEADER =
-  /(?:^|\n)\s*(?:#{1,3}\s*)?(?:\d+(?:\.\d+)?\.?\s+)?(?:\*\*)?Notas por subdimensi[oó]n(?:\s+e\s+[íi]ndice\s+IGIP)?(?:\*\*)?[^\n]*/i;
+function escapeRegexLabel(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Localiza todas las apariciones de encabezados de sección de notas. */
+function findAllScoresSectionStarts(report: string, indicatorLabel = "IGIP"): number[] {
+  const label = escapeRegexLabel(indicatorLabel);
+  const patterns = [
+    /(?:^|\n)\s*(?:#{1,3}\s*)?(?:\d+(?:\.\d+)?\.?\s+)?(?:\*\*)?Notas e [íi]ndice(?:\*\*)?[^\n]*/gi,
+    new RegExp(
+      `(?:^|\\n)\\s*(?:#{1,3}\\s*)?(?:\\d+(?:\\.\\d+)?\\.?\\s+)?(?:\\*\\*)?Notas por subdimensi[oó]n(?:\\s+e\\s+[íi]ndice(?:\\s+${label})?)?(?:\\*\\*)?[^\\n]*`,
+      "gi"
+    ),
+  ];
+  const indices: number[] = [];
+  for (const re of patterns) {
+    for (const m of report.matchAll(re)) {
+      if (m.index != null) indices.push(m.index);
+    }
+  }
+  return [...new Set(indices)].sort((a, b) => a - b);
+}
 
 /**
- * Reemplaza la sección de notas generada por el LLM (promedio simple erróneo)
- * por el bloque calculado con ponderaciones de la rúbrica.
+ * Solo devuelve inicio si la sección de notas está al cierre del informe (evita cortar el cuerpo).
+ */
+export function findTrailingScoresSectionStart(
+  report: string,
+  indicatorLabel = "IGIP"
+): number | null {
+  const starts = findAllScoresSectionStarts(report, indicatorLabel);
+  if (starts.length === 0) return null;
+  const last = starts[starts.length - 1]!;
+  if (hasSubstantiveContentAfterScoresHeader(report, last)) return null;
+  const tail = report.slice(last);
+  const headRatio = last / Math.max(report.length, 1);
+  if (headRatio >= 0.5) return last;
+  if (looksLikeScoresOnlyBlock(tail)) return last;
+  return null;
+}
+
+function hasSubstantiveContentAfterScoresHeader(report: string, scoresStart: number): boolean {
+  const after = report.slice(scoresStart).replace(/^[^\n]*\n?/, "");
+  return /(?:^|\n)\s*#{1,3}\s+(?!Notas)/im.test(after);
+}
+
+function looksLikeScoresOnlyBlock(tail: string): boolean {
+  if (/(?:\*\*Análisis\*\*|## Dimensi[oó]n)/i.test(tail)) return false;
+  return (
+    /(?:Índice|ponderaci[oó]n|índice final)/i.test(tail) ||
+    /:\s*[1-4]\s*(?:\(ponderaci)/i.test(tail)
+  );
+}
+
+/** @deprecated Use findTrailingScoresSectionStart */
+export function findScoresSectionStart(report: string, indicatorLabel = "IGIP"): number | null {
+  return findTrailingScoresSectionStart(report, indicatorLabel);
+}
+
+const FORMATTED_FIELD_HEADERS =
+  /^(?:Análisis|Justificación|Sugerencias(?:\s+de\s+mejora)?|Posibles\s+mejoras|Nota)\s*$/i;
+
+function isLikelyNextReportSectionHeader(line: string, currentSubName: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (/^#{1,3}\s/.test(trimmed)) return true;
+  const bold = /^\*\*([^*]+)\*\*\s*$/.exec(trimmed);
+  if (!bold) return false;
+  const title = bold[1].trim();
+  if (FORMATTED_FIELD_HEADERS.test(title)) return false;
+  if (/^Dimensi[oó]n:/i.test(title)) return true;
+  if (/^(?:Resumen|Síntesis)/i.test(title)) return true;
+  if (subdimensionNamesMatch(currentSubName, title)) return false;
+  return true;
+}
+
+function findFormattedSubdimensionStart(formatted: string, name: string): number | null {
+  const escaped = escapeRegex(name.trim());
+  const patterns = [
+    new RegExp(`(?:^|\\n)\\s*(?:#{1,3}\\s*)${escaped}\\s*\\n`, "i"),
+    new RegExp(`(?:^|\\n)\\s*\\*\\*${escaped}\\*\\*\\s*\\n`, "i"),
+    new RegExp(`(?:^|\\n)\\s*\\d+\\.\\s*${escaped}\\s*\\n`, "i"),
+  ];
+  for (const re of patterns) {
+    const m = re.exec(formatted);
+    if (m?.index != null) return m.index + m[0].length;
+  }
+  return null;
+}
+
+function extractFormattedSubdimensionBlock(formatted: string, name: string): string | null {
+  for (const sec of listSubdimensionSections(formatted)) {
+    if (subdimensionNamesMatch(name, sec.name)) return sec.body;
+  }
+  const startIdx = findFormattedSubdimensionStart(formatted, name);
+  if (startIdx == null) return null;
+  const bodyLines: string[] = [];
+  for (const line of formatted.slice(startIdx).split("\n")) {
+    if (isLikelyNextReportSectionHeader(line, name)) break;
+    bodyLines.push(line);
+  }
+  const body = bodyLines.join("\n").trim();
+  return body || null;
+}
+
+function isSubdimensionCompleteInFormatted(formatted: string, name: string): boolean {
+  const body = extractFormattedSubdimensionBlock(formatted, name);
+  if (!body) return false;
+  return parseSubdimensionScore(body) != null;
+}
+
+function removeFormattedSubdimensionBlock(formatted: string, name: string): string {
+  for (const sec of listSubdimensionSections(formatted)) {
+    if (!subdimensionNamesMatch(name, sec.name)) continue;
+    const headerRe = new RegExp(
+      `(?:^|\\n)\\s*(?:#{1,3}\\s*)?(?:\\d+\\.\\d+\\s+)?Subdimensi[oó]n[:\\s]+["']?${escapeRegex(sec.name)}["']?[^\\n]*\\n[\\s\\S]*?(?=\\n\\s*(?:#{1,3}\\s*)?(?:\\d+\\.\\d+\\s+)?Subdimensi[oó]n|#{1,2}\\s*Dimensi|$)`,
+      "i"
+    );
+    const next = formatted.replace(headerRe, "\n").trimEnd();
+    if (next !== formatted) return next;
+  }
+  const start = findFormattedSubdimensionStart(formatted, name);
+  if (start == null) return formatted;
+  let end = formatted.length;
+  const afterLines = formatted.slice(start).split("\n");
+  let offset = start;
+  for (const line of afterLines) {
+    if (offset > start && isLikelyNextReportSectionHeader(line, name)) {
+      end = offset;
+      break;
+    }
+    offset += line.length + 1;
+  }
+  const headerStart = formatted
+    .slice(0, start)
+    .search(new RegExp(`(?:^|\\n)\\s*(?:#{1,3}\\s*|\\*\\*)${escapeRegex(name.trim())}`, "i"));
+  const cutFrom = headerStart >= 0 ? headerStart : start;
+  return `${formatted.slice(0, cutFrom).trimEnd()}\n${formatted.slice(end).trimStart()}`.trimEnd();
+}
+
+function dimensionHeadingPresent(formatted: string, dimensionName: string): boolean {
+  const escaped = escapeRegex(dimensionName.trim());
+  return new RegExp(
+    `(?:^|\\n)\\s*(?:#{1,3}\\s*)?Dimensi[oó]n[:\\s]+${escaped}|\\*\\*Dimensi[oó]n:\\s*${escaped}\\*\\*`,
+    "i"
+  ).test(formatted);
+}
+
+/** Cuenta subdimensiones con Nota detectada en el informe formateado. */
+export function countCompleteSubdimensionsInFormatted(
+  formatted: string,
+  dimensions: { subdimensions: { name: string }[] }[]
+): { complete: number; total: number } {
+  let total = 0;
+  let complete = 0;
+  for (const dim of dimensions) {
+    for (const sub of dim.subdimensions) {
+      total++;
+      if (isSubdimensionCompleteInFormatted(formatted, sub.name)) complete++;
+    }
+  }
+  return { complete, total };
+}
+
+/**
+ * Solo repara si la cobertura es baja (truncado grave). Evita duplicar bloques al final
+ * cuando el formateo monolítico ya incluye la mayoría de subdimensiones.
+ */
+export function shouldRepairFormattedReport(
+  formatted: string,
+  dimensions: { subdimensions: { name: string }[] }[],
+  options?: { minCoverageRatio?: number; minComplete?: number }
+): boolean {
+  const { complete, total } = countCompleteSubdimensionsInFormatted(formatted, dimensions);
+  if (total === 0) return false;
+  if (complete === 0) return true;
+  const ratio = complete / total;
+  const minRatio = options?.minCoverageRatio ?? 0.8;
+  if (ratio >= minRatio) return false;
+  const minComplete = options?.minComplete ?? Math.max(1, Math.ceil(total * minRatio));
+  return complete < minComplete;
+}
+
+/**
+ * Si el formateo LLM truncó o omitió subdimensiones, las recupera desde el análisis crudo.
+ */
+export function repairFormattedReportFromRaw(
+  formatted: string,
+  rawEvaluation: string,
+  dimensions: { name: string; subdimensions: { name: string }[] }[]
+): string {
+  let result = formatted.trimEnd();
+  const appendBlocks: string[] = [];
+
+  for (const dim of dimensions) {
+    const missingSubs: { name: string; body: string }[] = [];
+    for (const sub of dim.subdimensions) {
+      if (isSubdimensionCompleteInFormatted(result, sub.name)) continue;
+      const body = extractSubdimensionSection(rawEvaluation, sub.name);
+      if (!body?.trim()) continue;
+      if (extractFormattedSubdimensionBlock(result, sub.name)) {
+        result = removeFormattedSubdimensionBlock(result, sub.name);
+      }
+      missingSubs.push({ name: sub.name, body: body.trim() });
+    }
+    if (missingSubs.length === 0) continue;
+
+    const dimHeading = dimensionHeadingPresent(result, dim.name);
+    if (!dimHeading && !dimensionHeadingPresent(appendBlocks.join("\n"), dim.name)) {
+      appendBlocks.push(`## Dimensión: ${dim.name}`);
+    }
+    for (const { name, body } of missingSubs) {
+      appendBlocks.push(`## ${name}\n\n${body}`);
+    }
+  }
+
+  if (appendBlocks.length === 0) return result;
+  return `${result}\n\n${appendBlocks.join("\n\n")}`;
+}
+
+/**
+ * Inserta el bloque autoritativo al cierre. Solo elimina una sección de notas LLM si está al final.
  */
 export function injectAuthoritativeScoresSection(
   report: string,
   schema: RubricScoreSchemaEntry[],
   scores: Record<string, number | null>,
-  overallScore: number | null
+  overallScore: number | null,
+  indicatorLabel = "IGIP"
 ): string {
-  const section = buildAuthoritativeScoresSection(schema, scores, overallScore);
-  const match = SCORES_SECTION_HEADER.exec(report);
-  if (match) {
-    const before = report.slice(0, match.index).trimEnd();
-    return `${before}\n\n${section}`;
-  }
-  return `${report.trimEnd()}\n\n${section}`;
+  const section = buildAuthoritativeScoresSection(schema, scores, overallScore, indicatorLabel);
+  const trailingStart = findTrailingScoresSectionStart(report, indicatorLabel);
+  const base =
+    trailingStart != null ? report.slice(0, trailingStart).trimEnd() : report.trimEnd();
+  return `${base}\n\n${section}`;
 }
 
 const PROJECT_SUMMARY_PATTERNS = [
@@ -308,13 +528,15 @@ export function isProjectDescriptionSummary(text: string): boolean {
 export function buildDeterministicEvaluationSummary(
   schema: RubricScoreSchemaEntry[],
   scores: Record<string, number | null>,
-  overallScore: number | null
+  overallScore: number | null,
+  indicatorLabel = "IGIP",
+  summaryMaxChars = 300
 ): string {
   const parts: string[] = [];
   if (overallScore != null) {
     const note =
       overallScore % 1 === 0 ? String(overallScore) : overallScore.toFixed(1);
-    parts.push(`Evaluación IGIP: nota ${note}.`);
+    parts.push(`Evaluación ${indicatorLabel}: nota ${note}.`);
   }
 
   const lows: string[] = [];
@@ -330,9 +552,45 @@ export function buildDeterministicEvaluationSummary(
   if (lows.length) parts.push(`Debilidades en ${lows.slice(0, 2).join("; ")}.`);
 
   if (parts.length === 0) {
-    return "Evaluación IGIP completada; consulte el informe para el detalle por subdimensión.";
+    return `Evaluación ${indicatorLabel} completada; consulte el informe para el detalle por subdimensión.`;
   }
-  return truncateSummary(parts.join(" "), 300);
+  return truncateSummary(parts.join(" "), summaryMaxChars);
+}
+
+/** Síntesis determinista para rúbrica por niveles (fallback). */
+export function buildDeterministicLevelsEvaluationSummary(
+  assignedLevel: number | null,
+  levelTitle: string,
+  indicatorLabel: string,
+  rawEvaluation: string,
+  summaryMaxChars = 1000
+): string {
+  const parts: string[] = [];
+  if (assignedLevel != null) {
+    parts.push(
+      `La evaluación ${indicatorLabel} sitúa el emprendimiento en el nivel ${assignedLevel}${levelTitle ? ` (${levelTitle})` : ""}.`
+    );
+  }
+
+  const justIdx = rawEvaluation.search(/justificaci[oó]n/i);
+  if (justIdx >= 0) {
+    const excerpt = rawEvaluation
+      .slice(justIdx)
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, Math.max(200, summaryMaxChars - 120));
+    if (excerpt.length > 60) parts.push(excerpt);
+  } else {
+    const compact = rawEvaluation.replace(/\s+/g, " ").trim();
+    if (compact.length > 80) {
+      parts.push(compact.slice(0, Math.max(180, summaryMaxChars - 100)));
+    }
+  }
+
+  if (parts.length === 0) {
+    return `Evaluación ${indicatorLabel} completada; consulte el informe para el detalle del nivel asignado.`;
+  }
+  return truncateSummary(parts.join(" "), summaryMaxChars);
 }
 
 /** Valida síntesis LLM o usa fallback determinista. */
@@ -340,13 +598,21 @@ export function finalizeEvaluationSummary(
   llmText: string,
   schema: RubricScoreSchemaEntry[],
   scores: Record<string, number | null>,
-  overallScore: number | null
+  overallScore: number | null,
+  indicatorLabel = "IGIP",
+  summaryMaxChars = 300
 ): string {
   const clean = llmText.trim();
   if (clean && !isProjectDescriptionSummary(clean)) {
-    return truncateSummary(clean, 300);
+    return truncateSummary(clean, summaryMaxChars);
   }
-  return buildDeterministicEvaluationSummary(schema, scores, overallScore);
+  return buildDeterministicEvaluationSummary(
+    schema,
+    scores,
+    overallScore,
+    indicatorLabel,
+    summaryMaxChars
+  );
 }
 
 /** Input acotado para síntesis: solo notas y fragmentos evaluativos. */

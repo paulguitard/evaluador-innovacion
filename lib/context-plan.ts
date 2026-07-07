@@ -1,9 +1,10 @@
 import type { ContextMode } from "@/lib/rag-limits";
+import type { ChatAgentConfig } from "@/lib/chat-agent-config";
+import { defaultChatAgentConfig } from "@/lib/chat-agent-config";
 
 /** Fuentes que pueden incluirse en el system prompt. */
 export type ContextSource =
   | "config_summary"
-  | "instructions"
   | "report_format"
   | "rubric"
   | "project"
@@ -38,7 +39,6 @@ export type ContextPlan = {
 
 export const ALL_SOURCES: ContextSource[] = [
   "config_summary",
-  "instructions",
   "report_format",
   "rubric",
   "project",
@@ -96,49 +96,51 @@ export function validateAndNormalizePlan(
 /** Comparación de varios capítulos del manual (sin modo resumen de un solo capítulo). */
 export function multiChapterComparisonPlan(
   ragQuery: string,
-  chapterNumbers: number[]
+  chapterNumbers: number[],
+  agentConfig: ChatAgentConfig = defaultChatAgentConfig()
 ): ContextPlan {
   const chList = chapterNumbers.join(" y ");
+  const rules = [
+    ...agentConfig.multiChapterResponseRules,
+    `Incluye un apartado por cada capítulo mencionado (${chList}) y un apartado final «Comparación» que relacione ambos según la pregunta.`,
+  ];
   return {
     agentLevel: "C",
     complexity: "complex",
     intent: "knowledge",
     intentLabel: `Comparación manual — capítulos ${chList}`,
     sources: ["knowledge_rag"],
-    excludeSources: ["rubric", "report_format", "instructions", "config_summary"],
+    excludeSources: ["rubric", "report_format", "config_summary"],
     ragMode: "chat-knowledge",
     ragQuery,
     chapterNumbers,
     comparisonMode: true,
     reasoning: `El usuario compara los capítulos ${chList} del manual; incluir fragmentos de cada capítulo.`,
-    responseRules: [
-      "Responde en español con una COMPARACIÓN estructurada, no un resumen sección por sección de un solo capítulo.",
-      `Incluye un apartado por cada capítulo mencionado (${chList}) y un apartado final «Comparación» que relacione ambos según la pregunta.`,
-      "Usa solo los fragmentos del Knowledge. PROHIBIDO usar la rúbrica IGIP.",
-      "Si un capítulo no tiene fragmentos en el contexto, indícalo sin inventar.",
-    ],
+    responseRules: rules,
     useToolLoop: true,
     toolsHint: ["search_knowledge"],
   };
 }
 
-export function knowledgeOnlyPlan(ragQuery: string, page?: number, chapter?: number): ContextPlan {
+export function knowledgeOnlyPlan(
+  ragQuery: string,
+  page?: number,
+  chapter?: number,
+  agentConfig: ChatAgentConfig = defaultChatAgentConfig()
+): ContextPlan {
   return {
     agentLevel: "A",
     complexity: "simple",
     intent: "knowledge",
     intentLabel: "Manual / Knowledge de referencia",
     sources: ["knowledge_rag"],
-    excludeSources: ["rubric", "report_format", "instructions", "config_summary"],
+    excludeSources: ["rubric", "report_format", "config_summary"],
     ragMode: chapter != null ? "chat-chapter" : page != null ? "chat-knowledge" : "chat-knowledge",
     ragQuery,
     pageNumber: page,
     chapterNumber: chapter,
     reasoning: "Pregunta sobre el manual de referencia; excluir rúbrica y configuración.",
-    responseRules: [
-      "Responde ÚNICAMENTE con información de los fragmentos del Knowledge.",
-      "PROHIBIDO usar la rúbrica IGIP ni criterios de evaluación del proyecto.",
-    ],
+    responseRules: [...agentConfig.knowledgeResponseRules],
     useToolLoop: false,
     toolsHint: [],
   };
@@ -170,11 +172,11 @@ export function configOnlyPlan(): ContextPlan {
     complexity: "simple",
     intent: "config",
     intentLabel: "Configuración",
-    sources: ["config_summary", "instructions", "report_format", "rubric"],
+    sources: ["config_summary", "report_format", "rubric"],
     excludeSources: ["knowledge_rag", "project", "project_structured"],
     ragMode: "chat-config",
     ragQuery: "",
-    reasoning: "Pregunta sobre configuración, instrucciones o rúbrica.",
+    reasoning: "Pregunta sobre configuración, formato o rúbrica.",
     responseRules: ["Responde solo desde las secciones de configuración indicadas."],
     useToolLoop: false,
     toolsHint: [],

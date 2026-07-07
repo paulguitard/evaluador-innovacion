@@ -1,8 +1,14 @@
 import { chatCompletion } from "@/lib/openrouter";
 import type { ElementDef } from "@/lib/excel-heuristics";
 
-function buildSystemPrompt(element: ElementDef): string {
-  return `Eres un asistente que estructura la carta Gantt / plan de actividades de proyectos IGIP.
+function buildSystemPrompt(element: ElementDef, structurePrompt?: string): string {
+  if (structurePrompt?.trim()) {
+    return `${structurePrompt.trim()}
+
+Descripción del elemento (prioridad máxima):
+${element.description}`;
+  }
+  return `Eres un asistente que estructura la carta Gantt / plan de actividades de proyectos.
 
 Recibirás datos de la hoja Excel con nombres y descripciones de actividades.
 
@@ -39,11 +45,12 @@ function parseStructureJson(raw: string): { content: string; confidence: string 
 
 export async function structureGanttActivitiesWithLlm(
   element: ElementDef,
-  rawContext: string
+  rawContext: string,
+  structurePrompt?: string
 ): Promise<{ content: string; confidence: string }> {
   const response = await chatCompletion(
     [
-      { role: "system", content: buildSystemPrompt(element) },
+      { role: "system", content: buildSystemPrompt(element, structurePrompt) },
       {
         role: "user",
         content: `Elemento: "${element.title}"

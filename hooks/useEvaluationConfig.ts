@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react";
 import { knowledgePathsToLabels } from "@/lib/extract-stream";
+import { mergeRubricConfig, buildRubricScoreSchemaFromConfig } from "@/lib/rubric-config";
+import type { RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
 
 export type ElementWithSection = {
   title: string;
@@ -13,12 +15,14 @@ export function useEvaluationConfig(activeTypeId: number | null, configOpen: boo
   const [elementsWithSection, setElementsWithSection] = useState<ElementWithSection[]>([]);
   const [knowledgeDocNames, setKnowledgeDocNames] = useState<string[]>([]);
   const [rubricPrompt, setRubricPrompt] = useState("");
+  const [scoreSchema, setScoreSchema] = useState<RubricScoreSchemaEntry[]>([]);
 
   useEffect(() => {
     if (!activeTypeId) {
       setElementsWithSection([]);
       setKnowledgeDocNames([]);
       setRubricPrompt("");
+      setScoreSchema([]);
       return;
     }
     fetch(`/api/config/${activeTypeId}`)
@@ -42,14 +46,24 @@ export function useEvaluationConfig(activeTypeId: number | null, configOpen: boo
         setElementsWithSection(mapped);
         const paths = Array.isArray(data.knowledge_paths) ? data.knowledge_paths : [];
         setKnowledgeDocNames(knowledgePathsToLabels(paths));
-        setRubricPrompt(typeof data.rubric_prompt === "string" ? data.rubric_prompt : "");
+        const rubric = mergeRubricConfig(data.rubric_config);
+        const schema = buildRubricScoreSchemaFromConfig(rubric);
+        setRubricPrompt(
+          schema.length > 0
+            ? schema.map((s) => `${s.dimension} / ${s.name}`).join("\n")
+            : typeof data.rubric_prompt === "string"
+              ? data.rubric_prompt
+              : ""
+        );
+        setScoreSchema(schema);
       })
       .catch(() => {
         setElementsWithSection([]);
         setKnowledgeDocNames([]);
         setRubricPrompt("");
+        setScoreSchema([]);
       });
   }, [activeTypeId, configOpen]);
 
-  return { elementsWithSection, knowledgeDocNames, rubricPrompt };
+  return { elementsWithSection, knowledgeDocNames, rubricPrompt, scoreSchema };
 }
