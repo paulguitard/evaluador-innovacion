@@ -30,10 +30,29 @@ describe("rubric-config", () => {
     assert.ok(cfg.dimensions.length >= 1);
   });
 
+  it("merge preserva nivel 0 y variables", () => {
+    const cfg = mergeRubricConfig({
+      type: "niveles",
+      levels: [{ id: "l0", level: 0, title: "Exploración", description: "" }],
+      variables: [
+        {
+          id: "v1",
+          name: "Tecnología",
+          levels: [{ level: 0, title: "T0", description: "criterio" }],
+        },
+      ],
+    });
+    assert.equal(cfg.type, "niveles");
+    assert.equal(cfg.type === "niveles" ? cfg.levels[0].level : null, 0);
+    assert.equal(cfg.type === "niveles" ? cfg.variables[0].name : null, "Tecnología");
+    assert.equal(cfg.type === "niveles" ? cfg.variables[0].levels[0].level : null, 0);
+  });
+
   it("merge respeta tipo niveles para TRL", () => {
     const cfg = mergeRubricConfig({}, "TRL");
     assert.equal(cfg.type, "niveles");
     assert.ok(cfg.type === "niveles" && cfg.levels.length >= 9);
+    assert.equal(cfg.type === "niveles" ? cfg.levels[0].level : null, 0);
   });
 
   it("parse legacy text produce ponderaciones", () => {

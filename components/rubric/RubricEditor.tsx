@@ -7,6 +7,7 @@ import type {
   RubricDimensionConfig,
   RubricLevelConfig,
   RubricSubdimensionConfig,
+  RubricVariableConfig,
 } from "@/lib/rubric-config";
 import {
   defaultRubricConfigNiveles,
@@ -14,6 +15,7 @@ import {
   newRubricId,
   totalWeightPercent,
 } from "@/lib/rubric-config";
+import { syncAllVariableLevels, syncVariableLevelsWithMain } from "@/lib/rubric-niveles";
 
 const inputClass =
   "w-full rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100";
@@ -311,67 +313,172 @@ function NivelesEditor({
   value: RubricConfigNiveles;
   onChange: (v: RubricConfigNiveles) => void;
 }) {
+  const setLevels = (levels: RubricLevelConfig[]) => {
+    const next = { ...value, levels };
+    onChange(syncAllVariableLevels(next));
+  };
+
   const updateLevel = (idx: number, level: RubricLevelConfig) => {
     const levels = [...value.levels];
     levels[idx] = level;
-    onChange({ ...value, levels });
+    setLevels(levels);
+  };
+
+  const updateVariable = (idx: number, variable: RubricVariableConfig) => {
+    const variables = [...value.variables];
+    variables[idx] = variable;
+    onChange({ ...value, variables });
   };
 
   return (
-    <div className="space-y-2">
-      <button
-        type="button"
-        className={btnClass}
-        onClick={() =>
-          onChange({
-            ...value,
-            levels: [
-              ...value.levels,
-              {
-                id: newRubricId(),
-                level: value.levels.length + 1,
-                title: `Nivel ${value.levels.length + 1}`,
-                description: "",
-              },
-            ],
-          })
-        }
-      >
-        + Nivel
-      </button>
-      {value.levels.map((lvl, i) => (
-        <div key={lvl.id} className="rounded border border-gray-200 p-2 dark:border-gray-700">
-          <div className="mb-1 flex flex-wrap gap-1">
-            <input
-              type="number"
-              className={`${inputClass} w-14`}
-              value={lvl.level}
-              onChange={(e) => updateLevel(i, { ...lvl, level: Number(e.target.value) })}
-            />
-            <input
-              className={`${inputClass} flex-1`}
-              value={lvl.title}
-              onChange={(e) => updateLevel(i, { ...lvl, title: e.target.value })}
-              placeholder="Título"
-            />
-            <button
-              type="button"
-              className={`${btnClass} text-red-600`}
-              onClick={() =>
-                onChange({ ...value, levels: value.levels.filter((_, j) => j !== i) })
-              }
-            >
-              Eliminar
-            </button>
-          </div>
-          <textarea
-            className={`${inputClass} min-h-[48px] resize-y`}
-            value={lvl.description}
-            onChange={(e) => updateLevel(i, { ...lvl, description: e.target.value })}
-            placeholder="Descripción del criterio para este nivel"
-          />
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+            Niveles principales (escala global)
+          </span>
+          <button
+            type="button"
+            className={btnClass}
+            onClick={() => {
+              const nextLevel =
+                value.levels.length === 0
+                  ? 0
+                  : Math.max(...value.levels.map((l) => l.level)) + 1;
+              setLevels([
+                ...value.levels,
+                {
+                  id: newRubricId(),
+                  level: nextLevel,
+                  title: `Nivel ${nextLevel}`,
+                  description: "",
+                },
+              ]);
+            }}
+          >
+            + Nivel
+          </button>
         </div>
-      ))}
+        {value.levels.map((lvl, i) => (
+          <div key={lvl.id} className="rounded border border-gray-200 p-2 dark:border-gray-700">
+            <div className="mb-1 flex flex-wrap gap-1">
+              <input
+                type="number"
+                className={`${inputClass} w-14`}
+                value={lvl.level}
+                onChange={(e) => updateLevel(i, { ...lvl, level: Number(e.target.value) })}
+              />
+              <input
+                className={`${inputClass} flex-1`}
+                value={lvl.title}
+                onChange={(e) => updateLevel(i, { ...lvl, title: e.target.value })}
+                placeholder="Título"
+              />
+              <button
+                type="button"
+                className={`${btnClass} text-red-600`}
+                onClick={() => setLevels(value.levels.filter((_, j) => j !== i))}
+              >
+                Eliminar
+              </button>
+            </div>
+            <textarea
+              className={`${inputClass} min-h-[48px] resize-y`}
+              value={lvl.description}
+              onChange={(e) => updateLevel(i, { ...lvl, description: e.target.value })}
+              placeholder="Descripción del criterio para este nivel"
+            />
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-2 border-t border-gray-200 pt-3 dark:border-gray-700">
+        <div className="flex items-center justify-between gap-2">
+          <div>
+            <span className="text-xs font-medium text-gray-700 dark:text-gray-300">Variables</span>
+            <p className="text-[10px] text-gray-500">
+              Perspectivas con criterios propios por nivel. El nivel global se define por mayoría.
+            </p>
+          </div>
+          <button
+            type="button"
+            className={btnClass}
+            onClick={() =>
+              onChange({
+                ...value,
+                variables: [
+                  ...value.variables,
+                  {
+                    id: newRubricId(),
+                    name: `Variable ${value.variables.length + 1}`,
+                    levels: syncVariableLevelsWithMain(value.levels),
+                  },
+                ],
+              })
+            }
+          >
+            + Variable
+          </button>
+        </div>
+
+        {value.variables.map((variable, vi) => (
+          <div
+            key={variable.id}
+            className="rounded border border-gray-200 bg-gray-50/40 p-2 dark:border-gray-700 dark:bg-gray-900/30"
+          >
+            <div className="mb-2 flex flex-wrap gap-1">
+              <input
+                className={`${inputClass} flex-1 font-medium`}
+                value={variable.name}
+                onChange={(e) => updateVariable(vi, { ...variable, name: e.target.value })}
+                placeholder="Nombre de la variable"
+              />
+              <button
+                type="button"
+                className={`${btnClass} text-red-600`}
+                onClick={() =>
+                  onChange({
+                    ...value,
+                    variables: value.variables.filter((_, j) => j !== vi),
+                  })
+                }
+              >
+                Eliminar
+              </button>
+            </div>
+            {variable.levels.map((vl, li) => (
+              <div
+                key={`${variable.id}-${value.levels[li]?.id ?? li}`}
+                className="mb-2 ml-1 border-l-2 border-gray-300 pl-2 dark:border-gray-600"
+              >
+                <div className="mb-1 flex items-center gap-1 text-[10px] text-gray-500">
+                  <span className="w-8 shrink-0">Nivel {vl.level}</span>
+                  <input
+                    className={`${inputClass} flex-1`}
+                    value={vl.title}
+                    onChange={(e) => {
+                      const levels = [...variable.levels];
+                      levels[li] = { ...vl, title: e.target.value };
+                      updateVariable(vi, { ...variable, levels });
+                    }}
+                    placeholder="Título (perspectiva)"
+                  />
+                </div>
+                <textarea
+                  className={`${inputClass} min-h-[40px] resize-y`}
+                  value={vl.description}
+                  onChange={(e) => {
+                    const levels = [...variable.levels];
+                    levels[li] = { ...vl, description: e.target.value };
+                    updateVariable(vi, { ...variable, levels });
+                  }}
+                  placeholder="Criterio de esta variable para el nivel"
+                />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -43,10 +43,27 @@ describe("report-format-config", () => {
     assert.equal(expanded.some((s) => s.kind === "custom"), false);
   });
 
+  it("plantilla niveles con variables incluye variable_eval y assigned_level", () => {
+    const fmt = defaultReportFormatNiveles();
+    const expanded = expandReportSections(
+      {
+        type: "niveles",
+        levels: [
+          { id: "l0", level: 0, title: "N0", description: "" },
+          { id: "l1", level: 1, title: "N1", description: "" },
+        ],
+        variables: [{ id: "v1", name: "Tecnología", levels: [] }],
+      },
+      fmt
+    );
+    assert.ok(expanded.some((s) => s.kind === "variable_eval"));
+    assert.ok(expanded.some((s) => s.kind === "assigned_level"));
+  });
+
   it("plantilla niveles incluye assigned_level obligatorio", () => {
     const fmt = defaultReportFormatNiveles();
     const expanded = expandReportSections(
-      { type: "niveles", levels: [{ id: "l1", level: 1, title: "N1", description: "" }] },
+      { type: "niveles", levels: [{ id: "l1", level: 1, title: "N1", description: "" }], variables: [] },
       fmt
     );
     assert.ok(expanded.some((s) => s.kind === "assigned_level"));

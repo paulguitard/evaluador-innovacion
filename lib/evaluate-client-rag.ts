@@ -34,7 +34,7 @@ export async function buildPrecomputedChunksForEvaluation(params: {
   plan?: EvaluatePlanResponse;
 }): Promise<Record<string, RetrievedChunk[]>> {
   const plan = params.plan ?? (await fetchEvaluatePlan(params.evaluationTypeId));
-  if (plan.rubricType === "niveles") {
+  if (plan.rubricType === "niveles" && plan.subdimensions.length === 1 && plan.subdimensions[0].key === "nivel-global") {
     return {};
   }
   const out: Record<string, RetrievedChunk[]> = {};

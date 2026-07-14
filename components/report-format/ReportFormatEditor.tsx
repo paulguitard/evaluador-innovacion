@@ -3,6 +3,7 @@
 import type { ReportCustomSection, ReportFormatConfig } from "@/lib/report-format-config";
 import {
   DEFAULT_SUBDIMENSION_EVAL_INSTRUCTIONS,
+  DEFAULT_VARIABLE_EVAL_INSTRUCTIONS,
   listRubricFormatRows,
   newReportSectionId,
   syncReportFormatWithRubric,
@@ -118,6 +119,7 @@ export default function ReportFormatEditor({
   const rubricRows = listRubricFormatRows(rubric);
   const dimensionRows = rubricRows.filter((r) => r.kind === "dimension_overview");
   const subdimensionRows = rubricRows.filter((r) => r.kind === "subdimension_eval");
+  const variableRows = rubricRows.filter((r) => r.kind === "variable_eval");
 
   const updatePreamble = (idx: number, sec: ReportCustomSection) => {
     const preamble = [...synced.preamble];
@@ -263,6 +265,66 @@ export default function ReportFormatEditor({
               >
                 Restaurar texto sugerido
               </button>
+            </div>
+          </>
+        ) : rubric.type === "niveles" && variableRows.length > 0 ? (
+          <>
+            <div className="rounded border border-gray-200 bg-white/60 p-2 dark:border-gray-600 dark:bg-gray-900/50">
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium text-gray-800 dark:text-gray-200">
+                  Evaluación por variable ({variableRows.length})
+                </span>
+                <CharLimitsEditor
+                  minChars={synced.subdimensionEvalLimits.minChars}
+                  maxChars={synced.subdimensionEvalLimits.maxChars}
+                  onChange={(minChars, maxChars) =>
+                    onChange({ ...synced, subdimensionEvalLimits: { minChars, maxChars } })
+                  }
+                />
+              </div>
+              <textarea
+                className={`${inputClass} min-h-[72px] resize-y`}
+                value={synced.subdimensionEvalInstructions}
+                onChange={(e) =>
+                  onChange({ ...synced, subdimensionEvalInstructions: e.target.value })
+                }
+              />
+              <button
+                type="button"
+                className={`${btnClass} mt-1 text-gray-500`}
+                onClick={() =>
+                  onChange({
+                    ...synced,
+                    subdimensionEvalInstructions: DEFAULT_VARIABLE_EVAL_INSTRUCTIONS,
+                  })
+                }
+              >
+                Restaurar texto sugerido
+              </button>
+              <ul className="mt-2 list-inside list-disc text-[10px] text-gray-500">
+                {variableRows.map((r) => (
+                  <li key={r.id}>{r.label}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="rounded border border-gray-200 bg-white/60 p-2 dark:border-gray-600 dark:bg-gray-900/50">
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">Nivel asignado global</span>
+                <CharLimitsEditor
+                  minChars={synced.assignedLevelLimits?.minChars ?? 1500}
+                  maxChars={synced.assignedLevelLimits?.maxChars ?? 2000}
+                  onChange={(minChars, maxChars) =>
+                    onChange({ ...synced, assignedLevelLimits: { minChars, maxChars } })
+                  }
+                />
+              </div>
+              <textarea
+                className={`${inputClass} min-h-[72px] resize-y`}
+                value={synced.assignedLevelInstructions ?? ""}
+                onChange={(e) =>
+                  onChange({ ...synced, assignedLevelInstructions: e.target.value })
+                }
+              />
             </div>
           </>
         ) : (

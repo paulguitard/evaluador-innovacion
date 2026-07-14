@@ -1,5 +1,6 @@
 import { extractSubdimensionSection } from "@/lib/evaluation-scores";
 import type { RubricConfig } from "@/lib/rubric-config";
+import { extractGlobalLevelSection, extractVariableSection } from "@/lib/rubric-niveles";
 import {
   condenseProjectElementsForPrompt,
   type ReportCustomSection,
@@ -262,6 +263,16 @@ export function resolveSectionSource(
   }
 
   if (section.kind === "assigned_level") {
+    const body = extractGlobalLevelSection(rawEvaluation);
+    return body ?? rawEvaluation;
+  }
+
+  if (rubric.type === "niveles" && section.kind === "variable_eval" && section.variableId) {
+    const variable = rubric.variables.find((v) => v.id === section.variableId);
+    if (variable) {
+      const body = extractVariableSection(rawEvaluation, variable.name);
+      if (body) return body;
+    }
     return rawEvaluation;
   }
 

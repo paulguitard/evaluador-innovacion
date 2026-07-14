@@ -7,6 +7,12 @@ import {
   buildRubricScoreSchemaFromConfig,
   type RubricConfigNiveles,
 } from "@/lib/rubric-config";
+import {
+  hasRubricVariables,
+  mainLevelsRubricText,
+  variableEvalContent,
+  variableLevelKey,
+} from "@/lib/rubric-niveles";
 import { CONTEXT_LIMITS, applyEvaluateRagOverrides } from "@/lib/rag-limits";
 
 export async function GET(
@@ -33,9 +39,29 @@ export async function GET(
     );
 
     if (rubric.type === "niveles") {
-      const rubricText = (rubric as RubricConfigNiveles).levels
-        .map((l) => `Nivel ${l.level} — ${l.title}\n${l.description}`)
-        .join("\n\n");
+      const niveles = rubric as RubricConfigNiveles;
+
+      if (hasRubricVariables(niveles)) {
+        const subdimensions = niveles.variables.map((variable) => ({
+          key: variableLevelKey(variable.name),
+          dimension: "Variables",
+          name: variable.name,
+          rubricContent: variableEvalContent(variable),
+        }));
+
+        return NextResponse.json({
+          rubricType: "niveles",
+          subdimensions,
+          ragEvaluate: {
+            topK: ragLimits.topK,
+            maxRetrievedChars: ragLimits.maxRetrievedChars,
+          },
+          knowledgeReferenceLabel: evaluation.knowledgeReferenceLabel,
+          projectElementsInRagQuery: evaluation.projectElementsInRagQuery,
+        });
+      }
+
+      const rubricText = mainLevelsRubricText(niveles.levels);
 
       return NextResponse.json({
         rubricType: "niveles",

@@ -42,9 +42,22 @@ export type RubricLevelConfig = {
   description: string;
 };
 
+export type RubricVariableLevelConfig = {
+  level: number;
+  title: string;
+  description: string;
+};
+
+export type RubricVariableConfig = {
+  id: string;
+  name: string;
+  levels: RubricVariableLevelConfig[];
+};
+
 export type RubricConfigNiveles = {
   type: "niveles";
   levels: RubricLevelConfig[];
+  variables: RubricVariableConfig[];
 };
 
 export type RubricConfig = RubricConfigPonderaciones | RubricConfigNiveles;
@@ -128,7 +141,7 @@ export function defaultRubricConfigPonderaciones(): RubricConfigPonderaciones {
 
 export function defaultRubricConfigNiveles(): RubricConfigNiveles {
   const levels: RubricLevelConfig[] = [];
-  for (let i = 1; i <= 9; i++) {
+  for (let i = 0; i < 9; i++) {
     levels.push({
       id: newRubricId(),
       level: i,
@@ -136,7 +149,7 @@ export function defaultRubricConfigNiveles(): RubricConfigNiveles {
       description: `Criterio para nivel ${i} (definir).`,
     });
   }
-  return { type: "niveles", levels };
+  return { type: "niveles", levels, variables: [] };
 }
 
 function inferRubricTypeFromName(typeName?: string): RubricType {
@@ -180,6 +193,32 @@ function mergePonderaciones(
   };
 }
 
+function mergeVariableLevels(
+  mainLevels: RubricLevelConfig[],
+  rawLevels: RubricVariableLevelConfig[] | undefined
+): RubricVariableLevelConfig[] {
+  const byLevel = new Map(
+    (rawLevels ?? [])
+      .filter((l) => l && Number.isFinite(Number(l.level)))
+      .map((l) => [
+        Number(l.level),
+        {
+          level: Number(l.level),
+          title: typeof l.title === "string" ? l.title.trim() : "",
+          description: typeof l.description === "string" ? l.description : "",
+        },
+      ])
+  );
+  return mainLevels.map((main) => {
+    const prev = byLevel.get(main.level);
+    return {
+      level: main.level,
+      title: prev?.title || main.title,
+      description: prev?.description ?? "",
+    };
+  });
+}
+
 function mergeNiveles(raw: Partial<RubricConfigNiveles> | null | undefined): RubricConfigNiveles {
   const base = defaultRubricConfigNiveles();
   if (!raw || raw.type !== "niveles") return base;
@@ -189,14 +228,26 @@ function mergeNiveles(raw: Partial<RubricConfigNiveles> | null | undefined): Rub
         .filter((l) => l && typeof l.title === "string")
         .map((l) => ({
           id: typeof l.id === "string" && l.id ? l.id : newRubricId(),
-          level: Number(l.level) || 1,
+          level: Number.isFinite(Number(l.level)) ? Number(l.level) : 0,
           title: l.title.trim(),
           description: typeof l.description === "string" ? l.description : "",
         }))
         .sort((a, b) => a.level - b.level)
     : base.levels;
 
-  return { type: "niveles", levels: levels.length > 0 ? levels : base.levels };
+  const mergedLevels = levels.length > 0 ? levels : base.levels;
+
+  const variables = Array.isArray(raw.variables)
+    ? raw.variables
+        .filter((v) => v && typeof v.name === "string" && v.name.trim())
+        .map((v) => ({
+          id: typeof v.id === "string" && v.id ? v.id : newRubricId(),
+          name: v.name.trim(),
+          levels: mergeVariableLevels(mergedLevels, v.levels),
+        }))
+    : [];
+
+  return { type: "niveles", levels: mergedLevels, variables };
 }
 
 export function mergeRubricConfig(
@@ -225,7 +276,13 @@ export function totalWeightPercent(config: RubricConfigPonderaciones): number {
 }
 
 export function isRubricConfigValid(config: RubricConfig): boolean {
-  if (config.type === "niveles") return config.levels.length > 0;
+  if (config.type === "niveles") {
+    if (config.levels.length === 0) return false;
+    if (config.variables.length === 0) return true;
+    return config.variables.every(
+      (v) => v.name.trim().length > 0 && v.levels.length === config.levels.length
+    );
+  }
   return config.dimensions.length > 0 && totalWeightPercent(config) === 100;
 }
 
@@ -275,9 +332,20 @@ export function parseRubricFromLegacyText(text: string): RubricConfigPonderacion
 
 export function compileRubricToLegacyText(config: RubricConfig): string {
   if (config.type === "niveles") {
-    return config.levels
+    const main = config.levels
       .map((l) => `Nivel ${l.level}: ${l.title}\n${l.description}`)
       .join("\n\n");
+    if (config.variables.length === 0) return main;
+    const vars = config.variables
+      .map((v) => {
+        const lines = [`----------Variable ${v.name}:-------------`];
+        for (const lvl of v.levels) {
+          lines.push(`Nivel ${lvl.level}: ${lvl.title}`, lvl.description);
+        }
+        return lines.join("\n");
+      })
+      .join("\n\n");
+    return `${main}\n\n${vars}`;
   }
 
   const parts: string[] = [];

@@ -20,6 +20,10 @@ import {
 } from "@/lib/format-report-sections";
 import { buildDeterministicLevelsEvaluationSummary } from "@/lib/evaluation-scores";
 import {
+  extractGlobalLevelSection,
+  extractVariableSection,
+} from "@/lib/rubric-niveles";
+import {
   expandReportSections,
   type ReportCustomSection,
   type ReportFormatConfig,
@@ -83,13 +87,28 @@ export function formatSubdimensionBlock(
   return `## ${section.title}\n\n${trimmed}`;
 }
 
+export function formatVariableBlock(
+  section: ReportSection,
+  rubric: RubricConfig,
+  rawEvaluation: string
+): string {
+  if (section.kind !== "variable_eval" || !section.variableId || rubric.type !== "niveles") {
+    return `## ${section.title}\n\n`;
+  }
+  const variable = rubric.variables.find((v) => v.id === section.variableId);
+  if (!variable) return `## ${section.title}\n\n`;
+  const body = extractVariableSection(rawEvaluation, variable.name)?.trim() ?? "";
+  if (!body) return `## ${section.title}\n\n`;
+  return `## ${section.title}\n\n${body}`;
+}
+
 export function formatAssignedLevelBlock(
   section: ReportSection,
   rawEvaluation: string
 ): string {
-  const trimmed = rawEvaluation.trim();
-  if (!trimmed) return `## ${section.title}\n\n`;
-  return `## ${section.title}\n\n${trimmed}`;
+  const body = extractGlobalLevelSection(rawEvaluation)?.trim() ?? rawEvaluation.trim();
+  if (!body) return `## ${section.title}\n\n`;
+  return `## ${section.title}\n\n${body}`;
 }
 
 function sectionNeedsLlm(section: ReportSection): boolean {
@@ -389,6 +408,11 @@ export async function* assembleFormattedReport(
 
     if (section.kind === "subdimension_eval") {
       yield prefix() + formatSubdimensionBlock(section, rubric, rawEvaluation);
+      continue;
+    }
+
+    if (section.kind === "variable_eval") {
+      yield prefix() + formatVariableBlock(section, rubric, rawEvaluation);
       continue;
     }
 

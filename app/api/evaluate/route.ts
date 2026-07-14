@@ -80,7 +80,9 @@ export async function POST(request: Request) {
         try {
           for await (const event of
             rubric.type === "niveles"
-              ? runEvaluateLevelsPipeline(evaluationTypeId, projectElementsTable)
+              ? runEvaluateLevelsPipeline(evaluationTypeId, projectElementsTable, {
+                  precomputedSubdimensionChunks,
+                })
               : runEvaluatePipeline(evaluationTypeId, projectElementsTable, {
                   precomputedSubdimensionChunks,
                 })) {

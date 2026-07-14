@@ -65,6 +65,13 @@ export type EvaluateStreamEvent =
     }
   | { type: "evaluation_summary"; text: string }
   | { type: "assigned_level"; level: number | null; title: string }
+  | {
+      type: "variable_level";
+      name: string;
+      level: number | null;
+      index: number;
+      total: number;
+    }
   | { type: "report_content"; content: string }
   | { type: "formatting"; message: string }
   | { type: "content"; chunk: string }

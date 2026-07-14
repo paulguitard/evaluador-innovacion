@@ -65,6 +65,27 @@ export function applyEvaluateStreamEvent(
         });
       }
       break;
+    case "variable_level":
+      if (event.level != null) {
+        trace.push({
+          id: nextTraceId(),
+          kind: "step",
+          title: `${event.name}: Nivel ${event.level}`,
+          detail: `Variable ${event.index}/${event.total}`,
+          live: false,
+        });
+      }
+      break;
+    case "assigned_level":
+      if (event.level != null) {
+        trace.push({
+          id: nextTraceId(),
+          kind: "step",
+          title: `Nivel global: ${event.level}${event.title ? ` (${event.title})` : ""}`,
+          live: false,
+        });
+      }
+      break;
     case "scores_summary":
       if (event.overallScore != null) {
         trace.push({

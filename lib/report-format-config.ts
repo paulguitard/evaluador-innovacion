@@ -1,10 +1,12 @@
 import { parseReportFormatLimits } from "@/lib/report-format-limits";
-import type { RubricConfig, RubricConfigPonderaciones } from "@/lib/rubric-config";
+import type { RubricConfig, RubricConfigNiveles, RubricConfigPonderaciones } from "@/lib/rubric-config";
+import { hasRubricVariables } from "@/lib/rubric-niveles";
 
 export type ReportSectionKind =
   | "custom"
   | "dimension_overview"
   | "subdimension_eval"
+  | "variable_eval"
   | "assigned_level";
 
 /** Sección expandida para runtime (prompt de formateo, límites de evaluación). */
@@ -17,6 +19,7 @@ export type ReportSection = {
   kind: ReportSectionKind;
   dimensionId?: string;
   subdimensionId?: string;
+  variableId?: string;
   locked?: boolean;
 };
 
@@ -58,6 +61,10 @@ export function subdimensionEvalId(subdimensionId: string): string {
   return `sub_eval_${subdimensionId}`;
 }
 
+export function variableEvalId(variableId: string): string {
+  return `var_eval_${variableId}`;
+}
+
 export const ASSIGNED_LEVEL_ID = "assigned_level";
 
 const DEFAULT_DIM_OVERVIEW = { minChars: 400, maxChars: 500 };
@@ -74,7 +81,12 @@ export const DEFAULT_DIMENSION_OVERVIEW_INSTRUCTIONS =
   "Resumen macro de la dimensión en conjunto, sintetizando las evaluaciones de sus subdimensiones. Integra hallazgos transversales y conclusión global de la dimensión. No re-evalúes criterios ni asignes notas.";
 
 export const DEFAULT_ASSIGNED_LEVEL_INSTRUCTIONS =
-  "Nivel global asignado, análisis de evidencia del proyecto y justificación fundamentada en el Knowledge.";
+  "Nivel global asignado, síntesis de las evaluaciones por variable y justificación fundamentada en el Knowledge.";
+
+export const DEFAULT_VARIABLE_EVAL_INSTRUCTIONS = `Incluye obligatoriamente en esta variable:
+1. **Análisis** — evaluación técnica exhaustiva según los criterios de la perspectiva.
+2. **Nivel asignado** — línea exacta «Nivel: N» con el nivel de esta variable.
+3. **Justificación** — fundamentada en el Knowledge y la evidencia del proyecto.`;
 
 export function defaultInstructionForSectionKind(kind: ReportSectionKind): string {
   switch (kind) {
@@ -82,6 +94,8 @@ export function defaultInstructionForSectionKind(kind: ReportSectionKind): strin
       return DEFAULT_DIMENSION_OVERVIEW_INSTRUCTIONS;
     case "subdimension_eval":
       return DEFAULT_SUBDIMENSION_EVAL_INSTRUCTIONS;
+    case "variable_eval":
+      return DEFAULT_VARIABLE_EVAL_INSTRUCTIONS;
     case "assigned_level":
       return DEFAULT_ASSIGNED_LEVEL_INSTRUCTIONS;
     default:
@@ -128,7 +142,7 @@ export function defaultReportFormatNiveles(): ReportFormatConfig {
   return {
     preamble: [],
     dimensionOverviewInstructions: "",
-    subdimensionEvalInstructions: "",
+    subdimensionEvalInstructions: DEFAULT_VARIABLE_EVAL_INSTRUCTIONS,
     dimensionOverviewLimits: { ...DEFAULT_DIM_OVERVIEW },
     subdimensionEvalLimits: { ...DEFAULT_SUB_EVAL },
     beforeScores: [],
@@ -214,6 +228,8 @@ export function resolveSectionInstruction(
       );
     case "subdimension_eval":
       return config.subdimensionEvalInstructions?.trim() || DEFAULT_SUBDIMENSION_EVAL_INSTRUCTIONS;
+    case "variable_eval":
+      return config.subdimensionEvalInstructions?.trim() || DEFAULT_VARIABLE_EVAL_INSTRUCTIONS;
     case "assigned_level":
       return config.assignedLevelInstructions?.trim() || DEFAULT_ASSIGNED_LEVEL_INSTRUCTIONS;
     default:
@@ -283,6 +299,7 @@ function migrateLegacySections(
     kind?: string;
     dimensionId?: string;
     subdimensionId?: string;
+    variableId?: string;
   }[],
   rubric?: RubricConfig
 ): ReportFormatConfig {
@@ -325,6 +342,13 @@ function migrateLegacySections(
     if (s.kind === "subdimension_eval" && s.subdimensionId) {
       seenRubric = true;
       const key = subdimensionEvalId(s.subdimensionId);
+      sectionLimits[key] = limits;
+      if (s.description?.trim() && !subInstruction) subInstruction = s.description.trim();
+      continue;
+    }
+    if (s.kind === "variable_eval" && s.variableId) {
+      seenRubric = true;
+      const key = variableEvalId(s.variableId);
       sectionLimits[key] = limits;
       if (s.description?.trim() && !subInstruction) subInstruction = s.description.trim();
       continue;
@@ -498,9 +522,24 @@ export function expandReportSections(
       }
     }
   } else {
+    const niveles = rubric as RubricConfigNiveles;
+    if (hasRubricVariables(niveles)) {
+      const varInstr = resolveSectionInstruction(synced, "variable_eval");
+      for (const variable of niveles.variables) {
+        out.push({
+          id: variableEvalId(variable.id),
+          title: variable.name,
+          description: varInstr,
+          ...synced.subdimensionEvalLimits,
+          kind: "variable_eval",
+          variableId: variable.id,
+          locked: true,
+        });
+      }
+    }
     out.push({
       id: ASSIGNED_LEVEL_ID,
-      title: "Nivel asignado",
+      title: hasRubricVariables(niveles) ? "Nivel asignado global" : "Nivel asignado",
       description: resolveSectionInstruction(synced, "assigned_level"),
       ...(synced.assignedLevelLimits ?? DEFAULT_ASSIGNED_LEVEL),
       kind: "assigned_level",
@@ -517,6 +556,12 @@ export function isReportFormatValid(config: ReportFormatConfig, rubric: RubricCo
   const expanded = expandReportSections(rubric, config);
   if (rubric.type === "ponderaciones") {
     return expanded.some((s) => s.kind === "subdimension_eval");
+  }
+  if (rubric.type === "niveles" && hasRubricVariables(rubric)) {
+    return (
+      expanded.some((s) => s.kind === "variable_eval") &&
+      expanded.some((s) => s.kind === "assigned_level")
+    );
   }
   return expanded.some((s) => s.kind === "assigned_level");
 }
@@ -702,9 +747,13 @@ export function buildFormatSystemPrompt(
       s.kind === "subdimension_eval"
         ? "\n   Conserva el orden del borrador: Análisis → Nota → Justificación → sugerencias de mejora. Una sola línea «Nota: N», sin duplicar en negrita."
         : "";
+    const variableNote =
+      s.kind === "variable_eval"
+        ? "\n   Conserva el orden del borrador: Análisis → Nivel asignado → Justificación. Una sola línea «Nivel: N»."
+        : "";
     return `${i + 1}. **${s.title}**
    Descripción: ${s.description}
-   Longitud: entre ${s.minChars} y ${s.maxChars} caracteres.${synthesisNote}${preambleNote}${synthesisFinalNote}${notaNote}`;
+   Longitud: entre ${s.minChars} y ${s.maxChars} caracteres.${synthesisNote}${preambleNote}${synthesisFinalNote}${notaNote}${variableNote}`;
   });
 
   const scoresNote =
@@ -852,11 +901,28 @@ export type RubricFormatRow =
       label: string;
       dimensionName: string;
     }
+  | {
+      id: string;
+      kind: "variable_eval";
+      variableId: string;
+      label: string;
+    }
   | { id: string; kind: "assigned_level"; label: string };
 
 export function listRubricFormatRows(rubric: RubricConfig): RubricFormatRow[] {
   if (rubric.type === "niveles") {
-    return [{ id: ASSIGNED_LEVEL_ID, kind: "assigned_level", label: "Nivel asignado" }];
+    const rows: RubricFormatRow[] = rubric.variables.map((v) => ({
+      id: variableEvalId(v.id),
+      kind: "variable_eval",
+      variableId: v.id,
+      label: v.name,
+    }));
+    rows.push({
+      id: ASSIGNED_LEVEL_ID,
+      kind: "assigned_level",
+      label: hasRubricVariables(rubric) ? "Nivel asignado global" : "Nivel asignado",
+    });
+    return rows;
   }
   const rows: RubricFormatRow[] = [];
   for (const dim of rubric.dimensions) {

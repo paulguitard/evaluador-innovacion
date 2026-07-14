@@ -118,6 +118,49 @@ export function EvaluationConfigFields({
             Restaurar sugerido
           </button>
         </div>
+      ) : rubric.type === "niveles" && rubric.variables.length > 0 ? (
+        <>
+          <div className="rounded border border-gray-200 bg-gray-50/60 p-2 dark:border-gray-600 dark:bg-gray-900/40">
+            <span className="mb-1 block font-medium text-gray-800 dark:text-gray-200">
+              Evaluación por variable
+            </span>
+            <p className="mb-1 text-[10px] text-gray-500">
+              Orientación del análisis técnico por perspectiva (sin límite de caracteres; solo tokens).
+            </p>
+            <textarea
+              className={`${textareaClass} min-h-[88px]`}
+              value={evaluation.phaseInstructions.subdimensionEval}
+              onChange={(e) => setPhase("subdimensionEval", e.target.value)}
+            />
+            <button
+              type="button"
+              className="mt-1 text-gray-500 hover:underline"
+              onClick={() => setPhase("subdimensionEval", DEFAULT_EVAL_SUBDIMENSION_PHASE)}
+            >
+              Restaurar sugerido
+            </button>
+          </div>
+          <div className="rounded border border-gray-200 bg-gray-50/60 p-2 dark:border-gray-600 dark:bg-gray-900/40">
+            <span className="mb-1 block font-medium text-gray-800 dark:text-gray-200">
+              Nivel global (síntesis)
+            </span>
+            <p className="mb-1 text-[10px] text-gray-500">
+              Orientación para la asignación final por mayoría de variables.
+            </p>
+            <textarea
+              className={textareaClass}
+              value={evaluation.phaseInstructions.assignedLevel}
+              onChange={(e) => setPhase("assignedLevel", e.target.value)}
+            />
+            <button
+              type="button"
+              className="mt-1 text-gray-500 hover:underline"
+              onClick={() => setPhase("assignedLevel", DEFAULT_EVAL_ASSIGNED_LEVEL_PHASE)}
+            >
+              Restaurar sugerido
+            </button>
+          </div>
+        </>
       ) : (
         <div className="rounded border border-gray-200 bg-gray-50/60 p-2 dark:border-gray-600 dark:bg-gray-900/40">
           <span className="mb-1 block font-medium text-gray-800 dark:text-gray-200">
