@@ -371,14 +371,21 @@ export default function ChatPanel({
           evaluateFullTraceRef.current = trace;
           reveal.setState(trace, "");
         },
+        onReportContent: (content) => {
+          onReportContentChange(content);
+        },
       });
+
+      if (!result.reportContent.trim()) {
+        throw new Error(
+          "La evaluación terminó sin informe. Reintente; en plan Hobby el proceso puede cortarse por timeout."
+        );
+      }
 
       evaluateCompletionPendingRef.current = formatEvaluateCompletionMessage();
       evaluateFullTraceRef.current = result.trace;
       reveal.setState(result.trace, "");
-      if (result.reportContent) {
-        onReportContentChange(result.reportContent);
-      }
+      onReportContentChange(result.reportContent);
       appendEvaluateCompletion();
     } catch (e) {
       evaluateCompletionPendingRef.current = null;

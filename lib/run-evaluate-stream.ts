@@ -81,6 +81,8 @@ export async function runEvaluateStream(params: {
   projectElementsTable: { element: string; content: string }[];
   onTraceUpdate?: (trace: AgentTraceEntry[]) => void;
   onIndexProgress?: (progress: KnowledgeIndexProgress) => void;
+  /** Se llama al recibir cada report_content (borrador o final). */
+  onReportContent?: (content: string) => void;
   signal?: AbortSignal;
   /** Índice ya cargado (p. ej. lote masivo). */
   knowledgeChunks?: import("@/lib/chunk-types").StoredChunk[];
@@ -139,6 +141,15 @@ export async function runEvaluateStream(params: {
   let subdimensionScores: Record<string, number | null> = {};
   let overallScore: number | null = null;
   let evaluationSummary = "";
+  let receivedDone = false;
+
+  const applyReportContent = (content: string) => {
+    const formatted = formatReportContent(content);
+    reportContent = formatted;
+    if (formatted.trim()) {
+      params.onReportContent?.(formatted);
+    }
+  };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -153,8 +164,11 @@ export async function runEvaluateStream(params: {
         throw new Error(event.error?.trim() || "Error en el pipeline de evaluación");
       }
       if (event.type === "report_content") {
-        reportContent = event.content;
+        applyReportContent(event.content);
         continue;
+      }
+      if (event.type === "done") {
+        receivedDone = true;
       }
       if (event.type === "subdimension_score") {
         const key = `${event.dimension} / ${event.name}`;
@@ -184,7 +198,10 @@ export async function runEvaluateStream(params: {
         throw new Error(event.error?.trim() || "Error en el pipeline de evaluación");
       }
       if (event.type === "report_content") {
-        reportContent = event.content;
+        applyReportContent(event.content);
+      }
+      if (event.type === "done") {
+        receivedDone = true;
       }
       if (event.type === "scores_summary") {
         subdimensionScores = { ...event.subdimensionScores };
@@ -199,12 +216,33 @@ export async function runEvaluateStream(params: {
     }
   }
 
+  if (!reportContent.trim()) {
+    throw new Error(
+      "La evaluación se interrumpió antes de generar el informe (suele ocurrir por timeout en plan Hobby de Vercel). Reintente o use plan Pro."
+    );
+  }
+
+  let finalTrace = streamState.trace.map((t) => ({ ...t, live: false }));
+  if (!receivedDone) {
+    finalTrace = [
+      ...finalTrace,
+      {
+        id: `partial-${Date.now()}`,
+        kind: "step" as const,
+        title:
+          "Informe parcial: el formateo final se cortó (posible timeout). Revise el panel derecho.",
+        detail: "",
+        live: false,
+      },
+    ];
+  }
+
   return {
-    reportContent: formatReportContent(reportContent),
+    reportContent,
     subdimensionScores,
     overallScore,
     evaluationSummary,
-    trace: streamState.trace.map((t) => ({ ...t, live: false })),
+    trace: finalTrace,
   };
 }
 

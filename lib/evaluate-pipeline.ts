@@ -513,6 +513,12 @@ export async function* runEvaluatePipeline(
     message: "Redactando resúmenes e integrando evaluación según formato…",
   };
 
+  // Borrador inmediato: si Vercel corta el formateo (p. ej. Hobby), el cliente ya tiene contenido.
+  yield {
+    type: "report_content",
+    content: stripCharacterLimitAnnotations(rawEvaluation),
+  };
+
   const formatCustom = evaluation.prompts.formatInstructions?.trim();
 
   const assembled = await collectAssembledReport({
