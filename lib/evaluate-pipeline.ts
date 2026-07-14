@@ -6,6 +6,7 @@ import { getEvaluationConfig } from "@/lib/evaluation-config-server";
 import type { EvaluationConfig } from "@/lib/evaluation-config";
 import { EvaluateLlmSemaphore } from "@/lib/evaluate-concurrency";
 import { stripCharacterLimitAnnotations } from "@/lib/report-format-limits";
+import { sanitizeLlmEvaluationText } from "@/lib/llm-output-sanitize";
 import { collectAssembledReport, generateFinalSynthesisSection } from "@/lib/assemble-formatted-report";
 import {
   enrichReportFormatWithLegacySections,
@@ -142,7 +143,7 @@ async function collectStream(
     for await (const chunk of streamChat(messages, { max_tokens: maxTokens, useCase: "evaluate" })) {
       out += chunk;
     }
-    return out;
+    return sanitizeLlmEvaluationText(out);
   };
   return semaphore ? semaphore.run(run) : run();
 }

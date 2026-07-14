@@ -30,6 +30,7 @@ import {
   type ReportSection,
 } from "@/lib/report-format-config";
 import type { RubricConfig } from "@/lib/rubric-config";
+import { sanitizeLlmEvaluationText } from "@/lib/llm-output-sanitize";
 
 export type AssembleFormattedReportOptions = {
   rubric: RubricConfig;
@@ -159,7 +160,7 @@ async function streamToText(
         buf += chunk;
       }
     }
-    return buf;
+    return sanitizeLlmEvaluationText(buf);
   };
   return options.semaphore ? options.semaphore.run(run) : run();
 }

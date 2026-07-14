@@ -13,6 +13,7 @@ import {
   type KnowledgeIndexProgress,
 } from "@/lib/knowledge-index-cache";
 import type { RetrievedChunk } from "@/lib/chunk-types";
+import { sanitizeLlmEvaluationText } from "@/lib/llm-output-sanitize";
 
 export type EvaluateStreamResult = {
   reportContent: string;
@@ -23,7 +24,7 @@ export type EvaluateStreamResult = {
 };
 
 function formatReportContent(text: string): string {
-  return stripCharacterLimitAnnotations(text);
+  return sanitizeLlmEvaluationText(stripCharacterLimitAnnotations(text));
 }
 
 function progressToTrace(message: string): AgentTraceEntry {

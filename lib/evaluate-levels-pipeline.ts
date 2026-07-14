@@ -17,6 +17,7 @@ import {
   mergeReportFormatConfig,
 } from "@/lib/report-format-config";
 import { stripCharacterLimitAnnotations } from "@/lib/report-format-limits";
+import { sanitizeLlmEvaluationText } from "@/lib/llm-output-sanitize";
 import { buildSubdimensionKnowledgeQuery } from "@/lib/evaluate-rag-query";
 import {
   isRubricConfigValid,
@@ -48,7 +49,7 @@ async function collectStream(
     for await (const chunk of streamChat(messages, { max_tokens: maxTokens, useCase: "evaluate" })) {
       out += chunk;
     }
-    return out;
+    return sanitizeLlmEvaluationText(out);
   };
   return semaphore ? semaphore.run(run) : run();
 }
