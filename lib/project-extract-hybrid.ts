@@ -162,7 +162,6 @@ export function tryDeterministicExtract(
 
   const heuristic = extractElementHeuristic(structuredFiles, element, {
     sheetPatterns: extractConfig?.sheetPatterns,
-    heuristics: extractConfig?.heuristics,
   });
   const content = heuristic.content.trim();
   if (!content || !isAcceptableExtractedContent(element, content)) return null;

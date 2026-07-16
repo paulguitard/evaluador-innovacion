@@ -11,7 +11,9 @@ import { fixedKeyFor } from "@/lib/eval-types/constants";
 import type { ContextMode } from "@/lib/rag-limits";
 
 /** Modos de chat; los límites de evaluación viven en §5 (evaluation_config.ragEvaluate). */
-const CHAT_CONTEXT_MODES: ContextMode[] = [
+type ChatContextMode = Exclude<ContextMode, "evaluate">;
+
+const CHAT_CONTEXT_MODES: ChatContextMode[] = [
   "chat-knowledge",
   "chat-project",
   "chat-chapter",
@@ -23,7 +25,7 @@ const inputClass =
 const textareaClass = `${inputClass} min-h-[72px] resize-y font-mono`;
 const fieldHintClass = "mb-1 text-[10px] leading-snug text-gray-500 dark:text-gray-400";
 
-const CHAT_MODE_DESCRIPTIONS: Record<(typeof CHAT_CONTEXT_MODES)[number], string> = {
+const CHAT_MODE_DESCRIPTIONS: Record<ChatContextMode, string> = {
   "chat-knowledge":
     "Chat centrado en los documentos de referencia (Knowledge): recupera fragmentos del índice RAG de manuales y guías.",
   "chat-project":
@@ -93,7 +95,7 @@ export function RagConfigFields({
   rag: RagConfig;
   onChange: (r: RagConfig) => void;
 }) {
-  const setMode = (mode: ContextMode, field: "topK" | "maxRetrievedChars" | "maxSystemChars", val: number) => {
+  const setMode = (mode: ChatContextMode, field: "topK" | "maxRetrievedChars" | "maxSystemChars", val: number) => {
     onChange({
       ...rag,
       modes: {

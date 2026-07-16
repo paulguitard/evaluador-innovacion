@@ -3,7 +3,7 @@ import { getEvaluationTypeByIdPostgres } from "@/lib/db-postgres";
 import { streamChat } from "@/lib/openrouter";
 import { getEvaluationConfig } from "@/lib/evaluation-config-server";
 import type { EvaluationConfig } from "@/lib/evaluation-config";
-import { getGlobalLlmSemaphore } from "@/lib/evaluate-concurrency";
+import { getGlobalLlmSemaphore, type EvaluateLlmSemaphore } from "@/lib/evaluate-concurrency";
 import { assembleFinalNivelesReportEvents } from "@/lib/assemble-final-report";
 import {
   enrichReportFormatWithLegacySections,

@@ -13,6 +13,7 @@ type PdfTextLike = React.ComponentType<{
 
 type PdfViewLike = React.ComponentType<{
   style?: object;
+  wrap?: boolean;
   children?: React.ReactNode;
 }>;
 

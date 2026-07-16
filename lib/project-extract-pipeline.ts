@@ -300,6 +300,8 @@ export async function retryExtractElement(input: {
     return { element: input.elementTitle, content: "", incomplete: true };
   }
 
+  const extractConfig = (await getEvaluationTypeSettings(input.evaluationTypeId)).extract;
+
   const needsIndex =
     input.skipReindex !== true && !projectIndexMatches(input.sessionId, input.projectFilePaths);
 
@@ -307,7 +309,6 @@ export async function retryExtractElement(input: {
     await ingestProjectFiles(input.sessionId, input.projectFilePaths, extractConfig);
   }
 
-  const extractConfig = (await getEvaluationTypeSettings(input.evaluationTypeId)).extract;
   const evaluationType = await getEvaluationTypeById(input.evaluationTypeId);
 
   const { content, method } = await extractElementHybrid(input.sessionId, element, {

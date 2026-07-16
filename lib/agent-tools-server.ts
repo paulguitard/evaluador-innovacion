@@ -16,15 +16,15 @@ function defDescription(def: { function: { description?: string } }): string {
   return def.function.description?.trim() ?? "";
 }
 
-const CHAT_TOOL_META: Record<
-  string,
-  Omit<Parameters<typeof toolEntry>[2], "name"> & {
-    title: string;
-    usedIn: string;
-    implementedIn: string;
-    configurableIn?: string;
-  }
-> = {
+type ToolCatalogMeta = {
+  title: string;
+  description: string;
+  usedIn: string;
+  implementedIn: string;
+  configurableIn?: string;
+};
+
+const CHAT_TOOL_META: Record<string, ToolCatalogMeta> = {
   search_knowledge: {
     title: "Buscar en Knowledge (RAG)",
     description:
@@ -99,15 +99,7 @@ const CHAT_TOOL_META: Record<
   },
 };
 
-const EXTRACT_TOOL_META: Record<
-  string,
-  Omit<Parameters<typeof toolEntry>[2], "name"> & {
-    title: string;
-    usedIn: string;
-    implementedIn: string;
-    configurableIn?: string;
-  }
-> = {
+const EXTRACT_TOOL_META: Record<string, ToolCatalogMeta> = {
   search_project: {
     title: "Buscar en el proyecto (extracción)",
     description:
