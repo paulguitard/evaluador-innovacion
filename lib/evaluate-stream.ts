@@ -96,6 +96,15 @@ export function applyEvaluateStreamEvent(
         });
       }
       break;
+    case "evaluation_scores":
+      trace.push({
+        id: nextTraceId(),
+        kind: "step",
+        title: "Notas por subdimensión consolidadas (JSON)",
+        detail: `${Object.keys(event.payload.subdimensionScores).length} nota(s); el índice se publica con el informe final`,
+        live: false,
+      });
+      break;
     case "evaluation_summary":
       trace.push({
         id: nextTraceId(),
@@ -110,6 +119,14 @@ export function applyEvaluateStreamEvent(
         kind: "step",
         title: event.message,
         live,
+      });
+      break;
+    case "report_draft":
+      trace.push({
+        id: nextTraceId(),
+        kind: "step",
+        title: "Borrador listo; pasando a redacción del informe final…",
+        live: false,
       });
       break;
     case "done":

@@ -49,11 +49,18 @@ export type HeuristicMatch = {
 const HIGH_CONFIDENCE = 0.72;
 const MIN_USABLE = 0.55;
 
-export function isHighConfidenceHeuristic(confidence: number): boolean {
-  return confidence >= HIGH_CONFIDENCE;
+export function isHighConfidenceHeuristic(
+  confidence: number,
+  threshold = HIGH_CONFIDENCE
+): boolean {
+  return confidence >= threshold;
 }
 
-export function needsLlmFallback(confidence: number, content: string): boolean {
+export function needsLlmFallback(
+  confidence: number,
+  content: string,
+  minUsable = MIN_USABLE
+): boolean {
   if (isLikelyGanttHeaderRowContent(content)) return true;
   return !content.trim() || confidence < MIN_USABLE;
 }

@@ -1,28 +1,22 @@
 "use client";
 
 import { useState, useRef } from "react";
-import type { ProjectStructuredData } from "@/lib/build-context";
 import AgentTrace from "@/components/AgentTrace";
 import BulkAgentPanel, { type BulkAgentSlot } from "@/components/BulkAgentPanel";
 import type { BulkProjectRow } from "@/hooks/useBulkEvaluation";
 import type { RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
 import { buildBulkEvaluationChatContext } from "@/lib/bulk-chat-context";
+import { buildBulkChatProjects } from "@/lib/bulk-chat-types";
 import type { AgentTraceEntry } from "@/lib/agent-events";
 import {
   applyChatStreamEvent,
   createChatStreamState,
   parseNdjsonLine,
 } from "@/lib/chat-stream";
-import {
-  formatEvaluateCompletionMessage,
-} from "@/lib/evaluate-stream";
-import { runEvaluateStream } from "@/lib/run-evaluate-stream";
 import { retrieveKnowledgeForChat } from "@/lib/chat-client-rag";
 import { isLikelyKnowledgeChatMessage } from "@/lib/chat-intent-client";
 import { fetchBulkEvaluationConfig } from "@/lib/bulk-evaluation-config-client";
 import { createStaggeredTraceReveal } from "@/lib/trace-reveal";
-import { stripCharacterLimitAnnotations } from "@/lib/report-format-limits";
-import type { EvaluationMode } from "@/lib/evaluation-mode";
 import { countBulkIgnoredFiles, filterBulkProjectFiles } from "@/lib/evaluation-mode";
 
 export type ChatMessage = {
@@ -32,11 +26,6 @@ export type ChatMessage = {
   traceRevealing?: boolean;
 };
 
-function formatReportContent(text: string): string {
-  return stripCharacterLimitAnnotations(stripThinkBlocks(text));
-}
-
-/** Elimina bloques <think>...</think> del texto para no mostrarlos en el chat. */
 function stripThinkBlocks(text: string): string {
   if (!text || typeof text !== "string") return text;
   let out = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
@@ -44,7 +33,6 @@ function stripThinkBlocks(text: string): string {
   return out.trim();
 }
 
-/** Icono de carga animado (spinner). */
 function LoadingSpinner({ className = "h-4 w-4" }: { className?: string }) {
   return (
     <svg
@@ -74,18 +62,7 @@ function LoadingSpinner({ className = "h-4 w-4" }: { className?: string }) {
 export default function ChatPanel({
   messages,
   onMessagesChange,
-  reportContent,
-  onReportContentChange,
   activeTypeId,
-  projectFilePaths,
-  onProjectFilePathsChange,
-  projectFiles,
-  onProjectFilesChange,
-  projectElementsTable,
-  projectStructuredData,
-  sessionId,
-  onProjectElementsTableChange,
-  evaluationMode = "individual",
   bulkFiles = [],
   onBulkFilesChange,
   bulkRunning = false,
@@ -96,18 +73,7 @@ export default function ChatPanel({
 }: {
   messages: ChatMessage[];
   onMessagesChange: (updater: (prev: ChatMessage[]) => ChatMessage[]) => void;
-  reportContent: string;
-  onReportContentChange: (content: string) => void;
   activeTypeId: number | null;
-  projectFilePaths: string[];
-  onProjectFilePathsChange: (paths: string[]) => void;
-  projectFiles: File[];
-  onProjectFilesChange: (files: File[]) => void;
-  projectElementsTable: { element: string; content: string }[];
-  projectStructuredData?: ProjectStructuredData;
-  sessionId: string;
-  onProjectElementsTableChange?: (rows: { element: string; content: string }[]) => void;
-  evaluationMode?: EvaluationMode;
   bulkFiles?: File[];
   onBulkFilesChange?: (files: File[]) => void;
   bulkRunning?: boolean;
@@ -118,15 +84,8 @@ export default function ChatPanel({
 }) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [evaluating, setEvaluating] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const traceRevealRef = useRef<ReturnType<typeof createStaggeredTraceReveal> | null>(null);
-  const evaluateRevealRef = useRef<ReturnType<typeof createStaggeredTraceReveal> | null>(null);
-  const evaluateTraceMsgIndexRef = useRef(-1);
-  const evaluateCompletionPendingRef = useRef<string | null>(null);
-  const evaluateFullTraceRef = useRef<AgentTraceEntry[]>([]);
 
   const CHAT_TIMEOUT_MS = 180_000;
 
@@ -160,9 +119,10 @@ export default function ChatPanel({
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
     try {
+      const bulkProjects = buildBulkChatProjects(bulkRows);
       const bulkEvaluationContext =
-        evaluationMode === "bulk" && bulkRows.length > 0
-          ? buildBulkEvaluationChatContext(bulkRows, bulkScoreSchema)
+        bulkProjects.length > 0
+          ? buildBulkEvaluationChatContext(bulkRows, bulkScoreSchema, { userMessage: text })
           : undefined;
 
       let precomputedKnowledgeChunks;
@@ -182,15 +142,11 @@ export default function ChatPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           evaluationTypeId: activeTypeId,
-          sessionId,
+          sessionId: "default",
           message: text,
-          projectFilePaths,
-          projectElementsTable: projectElementsTable?.length ? projectElementsTable : undefined,
-          projectStructuredData:
-            !projectElementsTable?.length && projectStructuredData
-              ? projectStructuredData
-              : undefined,
+          projectFilePaths: [],
           bulkEvaluationContext,
+          bulkProjects: bulkProjects.length > 0 ? bulkProjects : undefined,
           precomputedKnowledgeChunks,
           clientRagEnabled,
           messages: messages.slice(0, -1),
@@ -225,9 +181,6 @@ export default function ChatPanel({
             if (!event) continue;
             if (event.type === "error") throw new Error(event.error);
             streamState = applyChatStreamEvent(streamState, event, true);
-            if (event.type === "project_elements_updated" && onProjectElementsTableChange) {
-              onProjectElementsTableChange(event.elements);
-            }
             syncAssistant(true);
           }
         }
@@ -244,15 +197,13 @@ export default function ChatPanel({
 
       const final = stripThinkBlocks(streamState.content);
       if (!final.trim()) {
-        reveal.flushAll();
         onMessagesChange((prev) => {
           const next = [...prev];
           const last = next[next.length - 1];
           if (last?.role === "assistant") {
             next[next.length - 1] = {
               ...last,
-              content: "[Sin respuesta del evaluador. Intenta de nuevo.]",
-              trace: streamState.trace,
+              content: "[Sin respuesta del modelo]",
               traceRevealing: false,
             };
           }
@@ -260,164 +211,31 @@ export default function ChatPanel({
         });
       }
     } catch (e) {
-      clearTimeout(timeoutId);
-      traceRevealRef.current?.flushAll();
-      const msg = e instanceof Error ? e.message : String(e);
-      const isTimeout = msg.includes("abort") || msg.includes("timeout");
+      const msg =
+        e instanceof Error
+          ? e.name === "AbortError"
+            ? "La solicitud tardó demasiado. Intente de nuevo."
+            : e.message
+          : String(e);
       onMessagesChange((prev) => {
         const next = [...prev];
         const last = next[next.length - 1];
         if (last?.role === "assistant") {
           next[next.length - 1] = {
             ...last,
-            content: isTimeout
-              ? "[Tiempo de espera agotado. El evaluador tardó demasiado.]"
-              : `[Error: ${msg.trim() || "desconocido"}]`,
-            traceRevealing: false,
-          };
-        }
-        return next;
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleEvaluate = async () => {
-    if (!activeTypeId || evaluating) return;
-    setEvaluating(true);
-    onReportContentChange("");
-
-    evaluateRevealRef.current?.destroy();
-    evaluateTraceMsgIndexRef.current = -1;
-    evaluateFullTraceRef.current = [];
-    evaluateCompletionPendingRef.current = null;
-
-    const reveal = createStaggeredTraceReveal((revealed) => {
-      onMessagesChange((prev) => {
-        const next = [...prev];
-        const traceIdx = evaluateTraceMsgIndexRef.current;
-        if (traceIdx < 0 || traceIdx >= next.length || next[traceIdx]?.role !== "assistant") {
-          return next;
-        }
-        next[traceIdx] = {
-          ...next[traceIdx],
-          content: "",
-          trace: revealed.trace,
-          traceRevealing: revealed.revealing,
-        };
-        return next;
-      });
-      if (!revealed.revealing && evaluateCompletionPendingRef.current) {
-        appendEvaluateCompletion();
-      }
-    });
-    reveal.onFullyRevealed(() => {
-      if (evaluateCompletionPendingRef.current) {
-        appendEvaluateCompletion();
-      }
-    });
-    evaluateRevealRef.current = reveal;
-
-    onMessagesChange((prev) => {
-      const next: ChatMessage[] = [
-        ...prev,
-        { role: "assistant", content: "", trace: [], traceRevealing: true },
-      ];
-      evaluateTraceMsgIndexRef.current = next.length - 1;
-      return next;
-    });
-
-    const appendEvaluateCompletion = () => {
-      const msg = evaluateCompletionPendingRef.current;
-      if (!msg) return;
-      evaluateCompletionPendingRef.current = null;
-      const fullTrace = evaluateFullTraceRef.current;
-
-      onMessagesChange((prev) => {
-        const next = [...prev];
-        const traceIdx = evaluateTraceMsgIndexRef.current;
-        if (traceIdx >= 0 && traceIdx < next.length && next[traceIdx]?.role === "assistant") {
-          next[traceIdx] = {
-            ...next[traceIdx],
-            trace: fullTrace.map((t) => ({ ...t, live: false })),
-            traceRevealing: false,
-            content: "",
-          };
-        }
-        const alreadyHas = next.some(
-          (m, i) =>
-            i !== traceIdx &&
-            m.role === "assistant" &&
-            m.content === msg &&
-            !(m.trace?.length || m.traceRevealing)
-        );
-        if (!alreadyHas) {
-          next.push({ role: "assistant", content: msg });
-        }
-        return next;
-      });
-
-      evaluateRevealRef.current?.destroy();
-      evaluateRevealRef.current = null;
-      evaluateTraceMsgIndexRef.current = -1;
-    };
-
-    try {
-      const result = await runEvaluateStream({
-        evaluationTypeId: activeTypeId,
-        projectElementsTable: projectElementsTable ?? [],
-        onTraceUpdate: (trace) => {
-          evaluateFullTraceRef.current = trace;
-          reveal.setState(trace, "");
-        },
-        onReportContent: (content) => {
-          onReportContentChange(content);
-        },
-      });
-
-      if (!result.reportContent.trim()) {
-        throw new Error(
-          "La evaluación terminó sin informe. Reintente; en plan Hobby el proceso puede cortarse por timeout."
-        );
-      }
-
-      evaluateCompletionPendingRef.current = formatEvaluateCompletionMessage();
-      evaluateFullTraceRef.current = result.trace;
-      reveal.setState(result.trace, "");
-      onReportContentChange(result.reportContent);
-      appendEvaluateCompletion();
-    } catch (e) {
-      evaluateCompletionPendingRef.current = null;
-      evaluateRevealRef.current?.flushAll();
-      onMessagesChange((prev) => {
-        const next = [...prev];
-        const traceIdx = evaluateTraceMsgIndexRef.current;
-        if (traceIdx >= 0 && traceIdx < next.length && next[traceIdx]?.role === "assistant") {
-          next[traceIdx] = {
-            ...next[traceIdx],
-            content: `[Error: ${e instanceof Error ? e.message.trim() || "desconocido" : String(e)}]`,
+            content: `[Error: ${msg}]`,
             traceRevealing: false,
           };
         } else {
-          next.push({
-            role: "assistant",
-            content: `[Error: ${e instanceof Error ? e.message.trim() || "desconocido" : String(e)}]`,
-          });
+          next.push({ role: "assistant", content: `[Error: ${msg}]` });
         }
         return next;
       });
     } finally {
-      setEvaluating(false);
+      clearTimeout(timeoutId);
+      setLoading(false);
+      traceRevealRef.current?.flushAll();
     }
-  };
-
-  const handleEvaluateClick = () => {
-    if (evaluationMode === "bulk") {
-      onBulkEvaluate?.();
-      return;
-    }
-    void handleEvaluate();
   };
 
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -453,39 +271,19 @@ export default function ChatPanel({
     e.target.value = "";
   };
 
-  const handleUploadProject = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files?.length) return;
-    setUploading(true);
-    try {
-      const list = Array.from(files);
-      onProjectFilesChange(list);
-      onProjectFilePathsChange([]);
-    } finally {
-      setUploading(false);
-      e.target.value = "";
-    }
-  };
-
-  /** Nombre visible del archivo (sin prefijo de sesión si existe). */
-  const displayName = (path: string) => path.replace(/^[^/]+\//, "") || path;
-
   const isBulkCompletionMessage = (content: string) =>
     content.includes("Evaluación masiva finalizada");
 
-  const bulkCompletionIndex =
-    evaluationMode === "bulk"
-      ? messages.findIndex(
-          (m) => m.role === "assistant" && isBulkCompletionMessage(m.content)
-        )
-      : -1;
+  const bulkCompletionIndex = messages.findIndex(
+    (m) => m.role === "assistant" && isBulkCompletionMessage(m.content)
+  );
 
   const bulkIntroMessages =
     bulkCompletionIndex >= 0 ? messages.slice(0, bulkCompletionIndex) : messages;
   const bulkOutroMessages =
     bulkCompletionIndex >= 0 ? messages.slice(bulkCompletionIndex) : [];
 
-  const useBulkAgentPanels = evaluationMode === "bulk" && bulkAgents.length > 0;
+  const useBulkAgentPanels = bulkAgents.length > 0;
 
   const isBulkStatusMessage = (content: string) =>
     content.includes("Iniciando evaluación masiva") ||
@@ -494,29 +292,24 @@ export default function ChatPanel({
 
   const renderChatMessage = (m: ChatMessage, i: number, isLastInSection: boolean) => {
     const isBulkInteractiveReply =
-      evaluationMode === "bulk" &&
       m.role === "assistant" &&
       (m.traceRevealing || (m.trace != null && m.trace.length > 0));
 
     const allowBulkAgentUi =
-      evaluationMode !== "bulk" ||
       isBulkInteractiveReply ||
       (loading && isLastInSection && m.role === "assistant" && !isBulkStatusMessage(m.content));
 
     const showMessageAgentTrace =
       m.role === "assistant" &&
       allowBulkAgentUi &&
-      (m.trace?.length ||
-        m.traceRevealing ||
-        (loading && isLastInSection) ||
-        (evaluationMode !== "bulk" && (evaluating || bulkRunning) && isLastInSection));
+      (m.trace?.length || m.traceRevealing || (loading && isLastInSection));
 
     const showMessageSpinner =
       m.role === "assistant" &&
       !m.content &&
       allowBulkAgentUi &&
       isLastInSection &&
-      (loading || evaluating || bulkRunning || m.traceRevealing);
+      (loading || bulkRunning || m.traceRevealing);
 
     return (
       <div
@@ -543,10 +336,7 @@ export default function ChatPanel({
             <div className="mt-1.5 min-w-0 max-w-full overflow-hidden">
               <AgentTrace
                 entries={m.trace ?? []}
-                isActive={
-                  (loading || evaluating || bulkRunning || m.traceRevealing) &&
-                  isLastInSection
-                }
+                isActive={(loading || bulkRunning || m.traceRevealing) && isLastInSection}
                 isRevealing={!!m.traceRevealing}
               />
             </div>
@@ -558,16 +348,10 @@ export default function ChatPanel({
                   <LoadingSpinner />
                   <span className="text-gray-500 dark:text-gray-400">
                     {m.traceRevealing
-                      ? evaluating
-                        ? "Evaluando…"
-                        : "Analizando…"
+                      ? "Analizando…"
                       : m.trace?.length
-                        ? evaluating
-                          ? "Generando informe…"
-                          : "Generando respuesta…"
-                        : evaluating
-                          ? "Evaluando…"
-                          : "Respondiendo…"}
+                        ? "Generando respuesta…"
+                        : "Respondiendo…"}
                   </span>
                 </>
               ) : (
@@ -583,80 +367,22 @@ export default function ChatPanel({
   return (
     <div className="flex h-full flex-col bg-gray-50 dark:bg-[#1e1e1e]">
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-4 py-3">
-        {messages.length === 0 && evaluationMode !== "bulk" && (
-          <p className="text-sm text-gray-500 dark:text-gray-400">
-            {activeTypeId
-              ? "Escriba un mensaje o suba documentos del proyecto y pulse Evaluar."
-              : "Seleccione un tipo de evaluación o cree uno en Configuración."}
-          </p>
-        )}
-        {messages.length === 0 && evaluationMode === "bulk" && !useBulkAgentPanels && (
+        {messages.length === 0 && !useBulkAgentPanels && (
           <p className="text-sm text-gray-500 dark:text-gray-400">
             {activeTypeId
               ? "Elija una carpeta con proyectos y pulse Evaluar para iniciar la evaluación masiva."
               : "Seleccione un tipo de evaluación o cree uno en Configuración."}
           </p>
         )}
-        {evaluationMode === "bulk" ? (
-          <>
-            {bulkIntroMessages.map((m, i) =>
-              renderChatMessage(m, i, i === bulkIntroMessages.length - 1 && !useBulkAgentPanels)
-            )}
-            {useBulkAgentPanels && <BulkAgentPanel agents={bulkAgents} />}
-            {bulkOutroMessages.map((m, i) =>
-              renderChatMessage(
-                m,
-                bulkIntroMessages.length + i,
-                i === bulkOutroMessages.length - 1
-              )
-            )}
-          </>
-        ) : (
-          messages.map((m, i) => renderChatMessage(m, i, i === messages.length - 1))
+        {bulkIntroMessages.map((m, i) =>
+          renderChatMessage(m, i, i === bulkIntroMessages.length - 1 && !useBulkAgentPanels)
+        )}
+        {useBulkAgentPanels && <BulkAgentPanel agents={bulkAgents} />}
+        {bulkOutroMessages.map((m, i) =>
+          renderChatMessage(m, bulkIntroMessages.length + i, i === bulkOutroMessages.length - 1)
         )}
       </div>
-      {evaluationMode === "individual" && (projectFiles.length > 0 || projectFilePaths.length > 0) && (
-        <div className="shrink-0 border-t border-gray-200 px-4 py-1.5 dark:border-gray-700">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-xs text-gray-500 dark:text-gray-400">
-              Archivos del proyecto ({projectFiles.length || projectFilePaths.length}):
-            </span>
-            {(projectFiles.length > 0
-              ? projectFiles.map((f) => f.name)
-              : projectFilePaths.map(displayName)
-            ).map((name, idx) => (
-              <span
-                key={`${name}-${idx}`}
-                className="inline-flex max-w-[180px] items-center gap-1 rounded bg-gray-100 py-0.5 pl-1.5 pr-0.5 dark:bg-gray-700/80"
-                title={name}
-              >
-                <span className="min-w-0 truncate text-xs text-gray-600 dark:text-gray-300">
-                  {name}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (projectFiles.length > 0) {
-                      onProjectFilesChange(projectFiles.filter((_, i) => i !== idx));
-                    } else {
-                      onProjectFilePathsChange(projectFilePaths.filter((_, i) => i !== idx));
-                    }
-                    onProjectFilePathsChange([]);
-                  }}
-                  className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-600 dark:hover:bg-gray-600 dark:hover:text-gray-200"
-                  title="Quitar archivo"
-                  aria-label="Quitar archivo"
-                >
-                  <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
-      {evaluationMode === "bulk" && bulkFiles.length > 0 && (
+      {bulkFiles.length > 0 && (
         <div className="shrink-0 border-t border-gray-200 px-4 py-1.5 dark:border-gray-700">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-xs text-gray-500 dark:text-gray-400">
@@ -693,44 +419,20 @@ export default function ChatPanel({
         />
         <button
           type="button"
-          onClick={handleEvaluateClick}
-          disabled={
-            !activeTypeId ||
-            evaluating ||
-            bulkRunning ||
-            (evaluationMode === "bulk" && bulkFiles.length === 0)
-          }
+          onClick={() => onBulkEvaluate?.()}
+          disabled={!activeTypeId || bulkRunning || bulkFiles.length === 0}
           className="rounded-full bg-btn-primary-bg px-4 py-2 text-sm font-medium text-btn-primary-fg hover:bg-btn-primary-hover focus:outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-50"
         >
           {bulkRunning ? "Evaluando…" : "Evaluar"}
         </button>
-        {evaluationMode === "individual" ? (
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={!activeTypeId || uploading || bulkRunning}
-            className="rounded-full border border-btn-secondary-border bg-btn-secondary-bg px-4 py-2 text-sm font-medium text-btn-secondary-fg hover:bg-btn-secondary-hover focus:outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-50"
-          >
-            {uploading ? "Subiendo…" : "Subir archivos"}
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => folderInputRef.current?.click()}
-            disabled={!activeTypeId || bulkRunning}
-            className="rounded-full border border-btn-secondary-border bg-btn-secondary-bg px-4 py-2 text-sm font-medium text-btn-secondary-fg hover:bg-btn-secondary-hover focus:outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-50"
-          >
-            Elegir carpeta
-          </button>
-        )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.json"
-          className="hidden"
-          onChange={handleUploadProject}
-        />
+        <button
+          type="button"
+          onClick={() => folderInputRef.current?.click()}
+          disabled={!activeTypeId || bulkRunning}
+          className="rounded-full border border-btn-secondary-border bg-btn-secondary-bg px-4 py-2 text-sm font-medium text-btn-secondary-fg hover:bg-btn-secondary-hover focus:outline-none focus:ring-2 focus:ring-focus-ring disabled:opacity-50"
+        >
+          Elegir carpeta
+        </button>
         <input
           ref={folderInputRef}
           type="file"

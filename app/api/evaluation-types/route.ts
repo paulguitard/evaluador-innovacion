@@ -1,25 +1,19 @@
 import { NextResponse } from "next/server";
-import { getEvaluationTypes, createEvaluationType } from "@/lib/db";
+import { ensureFixedEvaluationTypes } from "@/lib/eval-types/ensure-fixed-types";
 
 export async function GET() {
   try {
-    const types = await getEvaluationTypes();
+    const types = await ensureFixedEvaluationTypes();
     return NextResponse.json(types);
   } catch (e) {
     return NextResponse.json({ error: String(e) }, { status: 500 });
   }
 }
 
-export async function POST(request: Request) {
-  try {
-    const body = await request.json();
-    const name = typeof body?.name === "string" ? body.name.trim() : "";
-    if (!name) {
-      return NextResponse.json({ error: "name is required" }, { status: 400 });
-    }
-    const id = await createEvaluationType(name);
-    return NextResponse.json({ id, name });
-  } catch (e) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
-  }
+/** Los tipos IGIP/IMET son fijos; no se pueden crear desde la API. */
+export async function POST() {
+  return NextResponse.json(
+    { error: "Los tipos de evaluación están fijos (IGIP e IMET). No se pueden crear nuevos." },
+    { status: 405 }
+  );
 }

@@ -4,6 +4,7 @@ import {
 } from "@/lib/project-structured-index";
 import { loadProjectChunks, loadProjectIndexMeta } from "@/lib/project-vector-store";
 import type { StoredChunk } from "@/lib/vector-store";
+import { getExtractRunContext } from "@/lib/extract-run-context";
 
 function formatChunksPlain(chunks: StoredChunk[]): string {
   return chunks
@@ -99,10 +100,13 @@ export async function executeProjectExtractTool(
       const { retrieveProjectChunksMulti, formatProjectChunksForPrompt } = await import(
         "@/lib/project-rag-retrieve"
       );
+      const extractConfig = getExtractRunContext();
+      const agent = extractConfig?.agent;
+      const retrieve = extractConfig?.projectRetrieve;
       const chunks = await retrieveProjectChunksMulti(sessionId, queries, {
-        topK: 18,
-        maxRetrievedChars: 22_000,
-        expandNeighbors: true,
+        topK: agent?.toolSearchTopK ?? 18,
+        maxRetrievedChars: agent?.toolSearchMaxRetrievedChars ?? 22_000,
+        expandNeighbors: (retrieve?.neighborWindow ?? 1) > 0,
       });
       if (chunks.length === 0) return "No se encontraron fragmentos relevantes.";
       return formatProjectChunksForPrompt(chunks);

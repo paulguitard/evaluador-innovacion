@@ -10,8 +10,6 @@ import type {
   RubricVariableConfig,
 } from "@/lib/rubric-config";
 import {
-  defaultRubricConfigNiveles,
-  defaultRubricConfigPonderaciones,
   newRubricId,
   totalWeightPercent,
 } from "@/lib/rubric-config";
@@ -29,33 +27,13 @@ export default function RubricEditor({
   value: RubricConfig;
   onChange: (v: RubricConfig) => void;
 }) {
-  const handleTypeChange = (next: "ponderaciones" | "niveles") => {
-    if (next === value.type) return;
-    const ok = window.confirm(
-      `¿Cambiar a rúbrica por ${next === "niveles" ? "niveles" : "ponderaciones"}? Se reemplazará la plantilla actual.`
-    );
-    if (!ok) return;
-    onChange(next === "niveles" ? defaultRubricConfigNiveles() : defaultRubricConfigPonderaciones());
-  };
-
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
-      <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <span className="text-xs text-gray-500 dark:text-gray-400">Tipo:</span>
-        <button
-          type="button"
-          className={`${btnClass} ${value.type === "ponderaciones" ? "ring-2 ring-blue-500" : ""}`}
-          onClick={() => handleTypeChange("ponderaciones")}
-        >
-          Ponderaciones
-        </button>
-        <button
-          type="button"
-          className={`${btnClass} ${value.type === "niveles" ? "ring-2 ring-blue-500" : ""}`}
-          onClick={() => handleTypeChange("niveles")}
-        >
-          Niveles
-        </button>
+      <div className="shrink-0 text-xs text-gray-500 dark:text-gray-400">
+        Modalidad fija:{" "}
+        <span className="font-medium text-gray-700 dark:text-gray-200">
+          {value.type === "ponderaciones" ? "Ponderaciones (IGIP)" : "Niveles (IMET)"}
+        </span>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto pr-1">
         {value.type === "ponderaciones" ? (

@@ -110,6 +110,26 @@ function buildSchemaListForPrompt(schema: RubricScoreSchemaEntry[]): string {
     .join("\n");
 }
 
+/** System prompt por defecto al extraer notas numéricas del borrador (IGIP). */
+export function buildDefaultScoreJsonSystemPrompt(
+  indicatorLabel = "IGIP",
+  options?: { scoreMin?: number; scoreMax?: number }
+): string {
+  const label = indicatorLabel.trim() || "IGIP";
+  const min = options?.scoreMin ?? 1;
+  const max = options?.scoreMax ?? 4;
+  return `Eres un extractor de notas de evaluación ${label}. Tu única tarea es leer los análisis por subdimensión y devolver un JSON con la nota numérica asignada (${min} a ${max}) a cada subdimensión.
+
+REGLAS:
+- Responde ÚNICAMENTE con JSON válido, sin markdown ni texto adicional.
+- Usa exactamente las claves indicadas en "subdimensionScores".
+- Cada valor debe ser un entero entre ${min} y ${max}.
+- Extrae la nota del veredicto evaluativo en cada bloque "### Subdimensión:"; no inventes notas.
+- La nota asignada es la línea "Nota: N" (o **Nota** seguida de N) dentro del análisis del evaluador.
+- IGNORA las líneas de criterio de rúbrica con formato "- Nota N: descripción..."; esas describen la escala, NO la nota asignada al proyecto.
+- Si hay ambigüedad, infiere la nota más coherente con el análisis y la justificación del evaluador.`;
+}
+
 export function buildScoresExtractionMessages(
   schema: RubricScoreSchemaEntry[],
   rawEvaluation: string,
@@ -123,16 +143,7 @@ export function buildScoresExtractionMessages(
     .map((e) => `    "${e.key}": 3`)
     .join(",\n");
 
-  const defaultSystem = `Eres un extractor de notas de evaluación ${label}. Tu única tarea es leer los análisis por subdimensión y devolver un JSON con la nota numérica asignada (${min} a ${max}) a cada subdimensión.
-
-REGLAS:
-- Responde ÚNICAMENTE con JSON válido, sin markdown ni texto adicional.
-- Usa exactamente las claves indicadas en "subdimensionScores".
-- Cada valor debe ser un entero entre ${min} y ${max}.
-- Extrae la nota del veredicto evaluativo en cada bloque "### Subdimensión:"; no inventes notas.
-- La nota asignada es la línea "Nota: N" (o **Nota** seguida de N) dentro del análisis del evaluador.
-- IGNORA las líneas de criterio de rúbrica con formato "- Nota N: descripción..."; esas describen la escala, NO la nota asignada al proyecto.
-- Si hay ambigüedad, infiere la nota más coherente con el análisis y la justificación del evaluador.`;
+  const defaultSystem = buildDefaultScoreJsonSystemPrompt(label, { scoreMin: min, scoreMax: max });
 
   return [
     {

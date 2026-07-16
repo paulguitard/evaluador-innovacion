@@ -10,6 +10,39 @@ export type RubricScoreSchemaEntry = {
   key: string;
 };
 
+/** JSON autoritativo de notas emitido al cerrar la evaluación (paso 4). */
+export type EvaluationScoresPayload = {
+  indicatorLabel: string;
+  subdimensionScores: Record<string, number | null>;
+  rows: {
+    key: string;
+    dimension: string;
+    subdimension: string;
+    score: number | null;
+    weight: number | null;
+  }[];
+  overallScore: number | null;
+};
+
+export function buildEvaluationScoresPayload(
+  schema: RubricScoreSchemaEntry[],
+  scores: Record<string, number | null>,
+  indicatorLabel = "IGIP"
+): EvaluationScoresPayload {
+  return {
+    indicatorLabel,
+    subdimensionScores: { ...scores },
+    rows: schema.map((entry) => ({
+      key: entry.key,
+      dimension: entry.dimension,
+      subdimension: entry.name,
+      score: scores[entry.key] ?? null,
+      weight: entry.weight,
+    })),
+    overallScore: computeWeightedIndicatorScore(schema, scores),
+  };
+}
+
 export function subdimensionScoreKey(dimension: string, name: string): string {
   return `${dimension} / ${name}`;
 }
@@ -66,6 +99,16 @@ export function parseSubdimensionScore(llmText: string): number | null {
   const fromNotaLine = parseScoreFromMatches(notaLineMatches);
   if (fromNotaLine != null) return fromNotaLine;
 
+  // Formato markdown compacto que emite el modelo: "**Nota:** N" o "**Nota: N**" (asteriscos rodeando los dos puntos)
+  // aparece con frecuencia inline dentro de un párrafo, no como línea nueva. Debe extraerse igual.
+  const boldNotaMatches = [
+    ...text.matchAll(
+      /\*\*\s*Nota\s*(?:asignada|obtenida|final)?\s*[:\-–—]\s*(?:\*\*)?\s*([1-4])(?:\s*\*\*)?\b/gi
+    ),
+  ];
+  const fromBoldNota = parseScoreFromMatches(boldNotaMatches);
+  if (fromBoldNota != null) return fromBoldNota;
+
   const inlineNota = /(?:^|\n)\s*Nota\s*(?:asignada|obtenida|final)?\s*[:\-–—]?\s*([1-4])\b/i.exec(
     text
   );
@@ -86,6 +129,14 @@ export function parseSubdimensionScore(llmText: string): number | null {
   ];
   const fromAssign = parseScoreFromMatches(assignMatches);
   if (fromAssign != null) return fromAssign;
+
+  const verbalNotaMatches = [
+    ...text.matchAll(
+      /(?:nota|calificaci[oó]n|puntuaci[oó]n)\s+(?:de|del|es|=)\s*([1-4])\b/gi
+    ),
+  ];
+  const fromVerbal = parseScoreFromMatches(verbalNotaMatches);
+  if (fromVerbal != null) return fromVerbal;
 
   const scaleMatches = [...text.matchAll(/(?:^|\n)\s*([1-4])\s*\/\s*4\b/gi)];
   const fromScale = parseScoreFromMatches(scaleMatches);
@@ -246,29 +297,40 @@ export function formatIndicatorScore(score: number): string {
   return rounded.toFixed(2);
 }
 
-function formatSubdimensionScoreLine(entry: RubricScoreSchemaEntry, score: number): string {
-  if (entry.weight != null && entry.weight > 0) {
-    return `${entry.name}: ${score} (ponderación ${entry.weight}%)`;
-  }
-  return `${entry.name}: ${score}`;
-}
-
-/** Bloque determinista de notas e índice del indicador para el informe/PDF. */
+/** Bloque determinista de notas e índice del indicador para el informe/PDF (tabla Markdown). */
 export function buildAuthoritativeScoresSection(
   schema: RubricScoreSchemaEntry[],
   scores: Record<string, number | null>,
   overallScore: number | null,
   indicatorLabel = "IGIP"
 ): string {
-  const lines = ["**Notas e índice**", ""];
+  const lines = ["**Notas e índice**", "", "| Subdimensión | Nota |", "| --- | --- |"];
   for (const entry of schema) {
     const score = scores[entry.key];
-    if (score != null) lines.push(formatSubdimensionScoreLine(entry, score));
+    if (score != null) lines.push(`| ${entry.name} | ${score} |`);
   }
   if (overallScore != null) {
     lines.push("", `**Índice ${indicatorLabel}**: ${formatIndicatorScore(overallScore)}`);
   }
   return lines.join("\n");
+}
+
+/** Mismo bloque autoritativo a partir del JSON de evaluación. */
+export function buildAuthoritativeScoresSectionFromPayload(
+  payload: EvaluationScoresPayload
+): string {
+  const schema: RubricScoreSchemaEntry[] = payload.rows.map((row) => ({
+    key: row.key,
+    dimension: row.dimension,
+    name: row.subdimension,
+    weight: row.weight,
+  }));
+  return buildAuthoritativeScoresSection(
+    schema,
+    payload.subdimensionScores,
+    payload.overallScore,
+    payload.indicatorLabel
+  );
 }
 
 function escapeRegexLabel(s: string): string {

@@ -48,11 +48,16 @@ describe("rubric-config", () => {
     assert.equal(cfg.type === "niveles" ? cfg.variables[0].levels[0].level : null, 0);
   });
 
-  it("merge respeta tipo niveles para TRL", () => {
-    const cfg = mergeRubricConfig({}, "TRL");
+  it("merge fuerza niveles para IMET", () => {
+    const cfg = mergeRubricConfig({}, "IMET");
     assert.equal(cfg.type, "niveles");
     assert.ok(cfg.type === "niveles" && cfg.levels.length >= 9);
     assert.equal(cfg.type === "niveles" ? cfg.levels[0].level : null, 0);
+  });
+
+  it("merge fuerza ponderaciones para IGIP aunque el JSON diga niveles", () => {
+    const cfg = mergeRubricConfig({ type: "niveles", levels: [], variables: [] }, "IGIP");
+    assert.equal(cfg.type, "ponderaciones");
   });
 
   it("parse legacy text produce ponderaciones", () => {

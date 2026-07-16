@@ -1,18 +1,12 @@
 import { getConfig } from "@/lib/db";
 import { getEvaluationTypeByIdPostgres } from "@/lib/db-postgres";
-import { buildSystemContext } from "@/lib/build-context";
 import { streamChat } from "@/lib/openrouter";
 import { getEvaluationConfig } from "@/lib/evaluation-config-server";
 import type { EvaluationConfig } from "@/lib/evaluation-config";
-import { EvaluateLlmSemaphore } from "@/lib/evaluate-concurrency";
-import {
-  collectAssembledReport,
-  generateFinalSynthesisSection,
-} from "@/lib/assemble-formatted-report";
+import { getGlobalLlmSemaphore } from "@/lib/evaluate-concurrency";
+import { assembleFinalNivelesReportEvents } from "@/lib/assemble-final-report";
 import {
   enrichReportFormatWithLegacySections,
-  findCustomSectionByTitlePattern,
-  getSynthesisMaxChars,
   isReportFormatValid,
   mergeReportFormatConfig,
 } from "@/lib/report-format-config";
@@ -36,8 +30,19 @@ import {
   variableLevelKey,
 } from "@/lib/rubric-niveles";
 import type { RetrievedChunk } from "@/lib/chunk-types";
-import { createEmptyArtifacts } from "@/lib/agent-tools";
 import type { EvaluateStreamEvent } from "@/lib/evaluate-pipeline";
+import {
+  applyPromptTemplate,
+  DEFAULT_ASSIGN_LEVEL_USER_PROMPT,
+  DEFAULT_GLOBAL_LEVEL_USER_PROMPT,
+  DEFAULT_VARIABLE_EVAL_USER_PROMPT,
+  formatOptionalPhaseInstructions,
+} from "@/lib/eval-types/prompt-defaults";
+import { resolveEvaluateSystemContextWithRetry } from "@/lib/resolve-evaluate-system-context";
+import {
+  EvaluateSystemContextError,
+  validateProjectElementsForEvaluation,
+} from "@/lib/evaluate-system-context-strict";
 
 async function collectStream(
   messages: { role: "system" | "user" | "assistant"; content: string }[],
@@ -64,29 +69,24 @@ type RagPassParams = {
   knowledgeLabel: string;
   semaphore?: EvaluateLlmSemaphore;
   precomputedKnowledgeChunks?: RetrievedChunk[];
+  subdimensionLabel: string;
 };
 
 async function runRagLlmPass(params: RagPassParams): Promise<string> {
-  const systemContent = await buildSystemContext(params.evaluationTypeId, [], {
+  validateProjectElementsForEvaluation(params.projectElementsTable);
+
+  const systemMessage = await resolveEvaluateSystemContextWithRetry({
+    evaluationTypeId: params.evaluationTypeId,
     projectElementsTable: params.projectElementsTable,
-    projectElementsOnly: true,
-    excludeReportFormat: true,
-    contextMode: "evaluate",
     ragQuery: params.ragQuery,
     evaluateSubdimension: params.evaluateSubdimension,
-    agentArtifacts: params.precomputedKnowledgeChunks?.length
-      ? { ...createEmptyArtifacts(), knowledgeChunks: params.precomputedKnowledgeChunks }
-      : undefined,
+    precomputedKnowledgeChunks: params.precomputedKnowledgeChunks,
+    subdimensionLabel: params.subdimensionLabel,
   });
 
   return collectStream(
     [
-      {
-        role: "system",
-        content:
-          (systemContent || "Eres evaluador de proyectos.") +
-          "\n\nResponde solo con el análisis. No uses etiquetas <think>.",
-      },
+      { role: "system", content: systemMessage },
       { role: "user", content: params.userPrompt },
     ],
     params.maxTokens,
@@ -99,26 +99,14 @@ function assignLevelPrompt(rubric: RubricConfigNiveles, evaluation: EvaluationCo
   const label = evaluation.knowledgeReferenceLabel;
   const phase = evaluation.phaseInstructions.assignedLevel.trim();
   const mainScale = mainLevelsRubricText(rubric.levels);
-
-  return `Asigna UN ÚNICO nivel global al proyecto según la escala de niveles.
-
-Escala principal de referencia:
-${mainScale}
-
-Metodología:
-1. Lee los criterios de cada nivel en la rúbrica.
-2. Contrasta con los elementos del proyecto y ${label} (Knowledge).
-3. Elige el nivel que mejor describe el estado actual del proyecto.
-
-REGLAS:
-- Responde con estas secciones (sin límite de caracteres; sé técnico y exhaustivo):
-  1. **Análisis** — evidencia del proyecto respecto a los criterios
-  2. **Nivel asignado** — una línea exacta: Nivel: N (donde N es uno de: ${nums})
-  3. **Justificación** — por qué ese nivel y no otro adyacente
-
-La línea "Nivel: N" debe estar en su propia línea.
-No uses etiquetas <think>.
-${phase ? `\n\nOrientación adicional:\n${phase}` : ""}`.trim();
+  const phaseBlock = phase ? `\n\nOrientación adicional:\n${phase}` : "";
+  const template = evaluation.prompts.assignLevel?.trim() || DEFAULT_ASSIGN_LEVEL_USER_PROMPT;
+  return applyPromptTemplate(template, {
+    mainScale,
+    knowledgeLabel: label,
+    levelNumbers: nums,
+    phaseInstructions: phaseBlock,
+  });
 }
 
 function variableEvalPrompt(
@@ -128,30 +116,14 @@ function variableEvalPrompt(
 ): string {
   const nums = validLevelNumbers(rubric).join(", ");
   const label = evaluation.knowledgeReferenceLabel;
-  const phase = evaluation.phaseInstructions.subdimensionEval.trim();
-
-  return `Evalúa la variable/perspectiva "${variable.name}" del proyecto.
-
-Metodología:
-1. Interpreta los criterios de cada nivel para esta perspectiva (${nums}).
-2. Localiza en los elementos del proyecto la evidencia relevante para "${variable.name}".
-3. Con el marco teórico de ${label} (Knowledge), asigna el nivel y redacta análisis y justificación.
-
-Incluye obligatoriamente estas secciones (sin límite de caracteres; sé técnico y exhaustivo):
-1. **Análisis** — evaluación rigurosa del proyecto según los criterios de esta variable
-2. **Nivel asignado** — OBLIGATORIO:
-   - Una línea exacta con el formato: Nivel: N
-   - N debe ser uno de: ${nums}
-3. **Justificación** — fundamentada en el Knowledge y la evidencia del proyecto
-
-La línea "Nivel: N" debe aparecer en su propia línea, después del Análisis y antes de la Justificación.
-${
-  phase.trim()
-    ? `\n\nOrientación adicional para esta evaluación:\n${phase.trim()}`
-    : ""
-}
-
-No uses etiquetas <think>. Responde solo con la evaluación de esta variable.`.trim();
+  const phaseBlock = formatOptionalPhaseInstructions(evaluation.phaseInstructions.subdimensionEval);
+  const template = evaluation.prompts.variableEval?.trim() || DEFAULT_VARIABLE_EVAL_USER_PROMPT;
+  return applyPromptTemplate(template, {
+    variable: variable.name,
+    levelNumbers: nums,
+    knowledgeLabel: label,
+    phaseInstructions: phaseBlock,
+  });
 }
 
 function globalLevelFromVariablesPrompt(
@@ -169,30 +141,20 @@ function globalLevelFromVariablesPrompt(
         `- ${v.name}: ${v.level != null ? `Nivel ${v.level}` : "sin nivel parseado"}`
     )
     .join("\n");
-
-  return `Determina el NIVEL GLOBAL del proyecto a partir de las evaluaciones por variable.
-
-Variables evaluadas:
-${summary}
-
-Regla de agregación: el nivel global se define por MAYORÍA de los niveles asignados por variable${
-    majorityLevel != null ? ` (mayoría sugerida: Nivel ${majorityLevel})` : ""
-  }. En empate, prevalece el nivel más alto.
-
-Escala principal:
-${mainLevelsRubricText(rubric.levels)}
+  const phaseBlock = phase ? `\n\nOrientación adicional:\n${phase}` : "";
+  const template = evaluation.prompts.globalLevel?.trim() || DEFAULT_GLOBAL_LEVEL_USER_PROMPT;
+  const base = applyPromptTemplate(template, {
+    variableSummary: summary,
+    majorityLevel: majorityLevel != null ? String(majorityLevel) : "n/d",
+    levelNumbers: nums,
+    knowledgeLabel: label,
+    phaseInstructions: phaseBlock,
+  });
+  // Adjuntar borradores de variables (siempre necesarios para el LLM).
+  return `${base}
 
 Evaluaciones por variable (borrador):
-${variableAnalyses.map((v) => `### Variable: ${v.name}\n\n${v.analysis.trim()}`).join("\n\n")}
-
-REGLAS — responde de forma más breve que las evaluaciones por variable:
-1. **Análisis** — síntesis de cómo convergen (o divergen) las variables
-2. **Nivel asignado** — una línea exacta: Nivel: N (donde N es uno de: ${nums})
-3. **Justificación** — por qué ese nivel global, citando la mayoría y el Knowledge (${label})
-
-La línea "Nivel: N" debe estar en su propia línea.
-No uses etiquetas <think>.
-${phase ? `\n\nOrientación adicional:\n${phase}` : ""}`.trim();
+${variableAnalyses.map((v) => `### Variable: ${v.name}\n\n${v.analysis.trim()}`).join("\n\n")}`.trim();
 }
 
 type VariableEvalResult = {
@@ -235,6 +197,7 @@ async function evaluateVariables(
       knowledgeLabel: evaluation.knowledgeReferenceLabel,
       semaphore,
       precomputedKnowledgeChunks: precomputedChunks?.[key],
+      subdimensionLabel: `variable ${variable.name}`,
     });
 
     const level = parseAssignedLevel(analysis, validLevelNumbers(rubric));
@@ -281,7 +244,7 @@ function buildRawEvaluationFromVariables(
 }
 
 /**
- * Evaluación por niveles (IMET/TRL): por variables + nivel global, informe desde §6.
+ * Evaluación por niveles (IMET): por variables + nivel global, informe desde §6.
  */
 export async function* runEvaluateLevelsPipeline(
   evaluationTypeId: number,
@@ -312,8 +275,17 @@ export async function* runEvaluateLevelsPipeline(
     return;
   }
 
-  const synthesisMax = getSynthesisMaxChars(reportFormat, rubric);
-  const semaphore = new EvaluateLlmSemaphore();
+  try {
+    validateProjectElementsForEvaluation(projectElementsTable);
+  } catch (err) {
+    yield {
+      type: "error",
+      error: err instanceof Error ? err.message : String(err),
+    };
+    return;
+  }
+
+  const semaphore = getGlobalLlmSemaphore();
   const levelNums = validLevelNumbers(rubric);
 
   let rawEvaluation: string;
@@ -345,13 +317,19 @@ export async function* runEvaluateLevelsPipeline(
       message: "Determinando nivel global del proyecto…",
     };
 
+    const rubricText = mainLevelsRubricText(rubric.levels);
     const globalAnalysis = await runRagLlmPass({
       evaluationTypeId,
       projectElementsTable,
       ragQuery: [
-        mainLevelsRubricText(rubric.levels).slice(0, 600),
+        rubricText.slice(0, 600),
         variableResults.map((r) => `${r.variable.name} ${r.level ?? ""}`).join(" "),
       ].join(" "),
+      evaluateSubdimension: {
+        dimensionName: "Nivel global",
+        name: "Asignación de nivel",
+        content: rubricText,
+      },
       userPrompt: globalLevelFromVariablesPrompt(
         rubric,
         evaluation,
@@ -365,6 +343,7 @@ export async function* runEvaluateLevelsPipeline(
       maxTokens: evaluation.maxTokens.dimensionOverview,
       knowledgeLabel: evaluation.knowledgeReferenceLabel,
       semaphore,
+      subdimensionLabel: "nivel global (desde variables)",
     });
 
     rawEvaluation = buildRawEvaluationFromVariables(variableResults, globalAnalysis);
@@ -390,6 +369,7 @@ export async function* runEvaluateLevelsPipeline(
       userPrompt: assignLevelPrompt(rubric, evaluation),
       maxTokens: evaluation.maxTokens.subdimension,
       knowledgeLabel: evaluation.knowledgeReferenceLabel,
+      subdimensionLabel: "nivel global",
     });
 
     assignedLevel = parseAssignedLevel(rawEvaluation, levelNums);
@@ -404,54 +384,42 @@ export async function* runEvaluateLevelsPipeline(
     title: levelTitle,
   };
 
-  yield { type: "formatting", message: "Redactando resúmenes e integrando evaluación según formato…" };
+  yield { type: "formatting", message: "Informe final: integrando evaluación y redactando secciones con IA…" };
 
-  // Borrador inmediato: si Vercel corta el formateo (p. ej. Hobby), el cliente ya tiene contenido.
   yield {
-    type: "report_content",
+    type: "report_draft",
     content: stripCharacterLimitAnnotations(rawEvaluation),
   };
 
-  const custom = evaluation.prompts.formatInstructions?.trim();
-  const assembled = await collectAssembledReport({
+  let assembled: { finalReport: string; evaluationSummary: string } | undefined;
+
+  for await (const event of assembleFinalNivelesReportEvents({
     rubric,
     reportFormat,
     rawEvaluation,
     projectElementsTable,
     evaluation,
-    formatInstructionsExtra: custom,
-    semaphore,
-  });
-
-  let sanitized = stripCharacterLimitAnnotations(assembled);
-
-  const synSection = findCustomSectionByTitlePattern(reportFormat, /síntesis|sintesis/i);
-  const hasSynthesis = synthesisMax != null && synthesisMax > 0 && synSection;
-
-  if (hasSynthesis) {
-    yield { type: "step", message: "Generando síntesis evaluativa final…" };
-
-    const evaluationSummary = await generateFinalSynthesisSection({
-      synSection,
-      rubric,
-      evaluation,
-      rawEvaluation,
-      scoreSchema: [],
-      subdimensionScores: {},
-      overallScore: null,
-      assignedLevel,
-      levelTitle,
-      semaphore,
-    });
-
-    yield {
-      type: "evaluation_summary",
-      text: evaluationSummary.replace(/^##\s*[^\n]+\n+/, "").trim(),
-    };
-
-    sanitized = `${sanitized.trimEnd()}\n\n${evaluationSummary.trim()}`;
+    assignedLevel,
+    levelTitle,
+  })) {
+    if (event.type === "step") {
+      yield { type: "step", message: event.message };
+    } else {
+      assembled = event.result;
+    }
   }
 
-  yield { type: "report_content", content: sanitized };
+  if (!assembled) {
+    throw new Error("El ensamblado del informe no produjo resultado.");
+  }
+
+  if (assembled.evaluationSummary.trim()) {
+    yield {
+      type: "evaluation_summary",
+      text: assembled.evaluationSummary,
+    };
+  }
+
+  yield { type: "report_content", content: assembled.finalReport };
   yield { type: "done" };
 }

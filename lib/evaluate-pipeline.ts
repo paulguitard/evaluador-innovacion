@@ -1,47 +1,62 @@
 import { getConfig } from "@/lib/db";
 import { getEvaluationTypeByIdPostgres } from "@/lib/db-postgres";
-import { buildSystemContext } from "@/lib/build-context";
 import { streamChat } from "@/lib/openrouter";
 import { getEvaluationConfig } from "@/lib/evaluation-config-server";
 import type { EvaluationConfig } from "@/lib/evaluation-config";
-import { EvaluateLlmSemaphore } from "@/lib/evaluate-concurrency";
+import { getGlobalLlmSemaphore, type EvaluateLlmSemaphore } from "@/lib/evaluate-concurrency";
+import {
+  logEvaluateSubdimSummary,
+  recordEvaluateSubdimAttempt,
+} from "@/lib/evaluate-subdim-telemetry";
 import { stripCharacterLimitAnnotations } from "@/lib/report-format-limits";
 import { sanitizeLlmEvaluationText } from "@/lib/llm-output-sanitize";
-import { collectAssembledReport, generateFinalSynthesisSection } from "@/lib/assemble-formatted-report";
+import {
+  assembleFinalPonderacionesReportEvents,
+  type AssembleFinalReportResult,
+} from "@/lib/assemble-final-report";
 import {
   enrichReportFormatWithLegacySections,
-  findCustomSectionByTitlePattern,
-  getSynthesisMaxChars,
   isReportFormatValid,
   mergeReportFormatConfig,
   type ReportFormatConfig,
 } from "@/lib/report-format-config";
 import {
-  backfillSubdimensionScores,
-  buildEvaluationInputForSummary,
-  computeWeightedIndicatorScore,
-  finalizeEvaluationSummary,
-  formatIndicatorScore,
-  injectAuthoritativeScoresSection,
+  getRawSubdimensionAnalysisIssues,
+  isRawSubdimensionAnalysisComplete,
+} from "@/lib/report-completeness";
+import {
   parseSubdimensionScore,
-  parseSubdimensionScoreFromNamedSection,
   subdimensionScoreKey,
+  buildEvaluationScoresPayload,
 } from "@/lib/evaluation-scores";
-import { mergeAuthoritativeScores } from "@/lib/evaluation-scores-json";
+import {
+  isRubricConfigValid,
+  mergeRubricConfig,
+  buildRubricScoreSchemaFromConfig,
+  subdimensionEvalContent,
+  type RubricConfigPonderaciones,
+} from "@/lib/rubric-config";
 import {
   type RubricDimension,
   type RubricSubdimension,
 } from "@/lib/rubric-dimensions";
 import { buildSubdimensionKnowledgeQuery } from "@/lib/evaluate-rag-query";
-import {
-  buildRubricScoreSchemaFromConfig,
-  isRubricConfigValid,
-  mergeRubricConfig,
-  subdimensionEvalContent,
-  type RubricConfigPonderaciones,
-} from "@/lib/rubric-config";
 import type { RetrievedChunk } from "@/lib/chunk-types";
-import { createEmptyArtifacts } from "@/lib/agent-tools";
+import {
+  applyPromptTemplate,
+  DEFAULT_SUBDIMENSION_USER_PROMPT,
+  formatOptionalPhaseInstructions,
+} from "@/lib/eval-types/prompt-defaults";
+import { resolveEvaluateSystemContextWithRetry } from "@/lib/resolve-evaluate-system-context";
+import {
+  buildMissingNotaRecoveryPrompt,
+  buildSubdimensionRetryPrompt,
+  MAX_SUBDIM_QUALITY_RETRIES,
+} from "@/lib/subdimension-retry-prompt";
+import {
+  EvaluateSystemContextError,
+  validateProjectElementsForEvaluation,
+} from "@/lib/evaluate-system-context-strict";
 
 export type EvaluateStreamEvent =
   | { type: "step"; message: string }
@@ -64,6 +79,10 @@ export type EvaluateStreamEvent =
       subdimensionScores: Record<string, number | null>;
       overallScore: number | null;
     }
+  | {
+      type: "evaluation_scores";
+      payload: import("@/lib/evaluation-scores").EvaluationScoresPayload;
+    }
   | { type: "evaluation_summary"; text: string }
   | { type: "assigned_level"; level: number | null; title: string }
   | {
@@ -73,6 +92,7 @@ export type EvaluateStreamEvent =
       index: number;
       total: number;
     }
+  | { type: "report_draft"; content: string }
   | { type: "report_content"; content: string }
   | { type: "formatting"; message: string }
   | { type: "content"; chunk: string }
@@ -91,46 +111,16 @@ function subdimensionUserPrompt(
     { length: scoreScale.max - scoreScale.min + 1 },
     (_, i) => scoreScale.min + i
   ).join(", ");
-
-  return `Evalúa la subdimensión "${subdimension.name}" dentro de la dimensión "${dimension.name}".
-
-Metodología:
-1. Interpreta los criterios de la subdimensión y qué conlleva cada nota (${scoreExamples}).
-2. Localiza en los elementos del proyecto la información que se refiere a "${subdimension.name}".
-3. Con el marco teórico de ${label} (Knowledge), asigna la nota y redacta análisis, justificación y mejoras.
-
-Usa ÚNICAMENTE:
-- Los elementos identificados del proyecto en "Documentos del proyecto a evaluar".
-- Los fragmentos de ${label} (Knowledge) incluidos en el contexto.
-- Los criterios de la subdimensión en "Enfoque de esta evaluación parcial".
-
-Incluye obligatoriamente estas secciones (sin límite de caracteres; sé técnico y exhaustivo):
-1. **Análisis** — evaluación rigurosa del proyecto según los criterios
-2. **Nota** — OBLIGATORIO e INNEGOCIABLE:
-   - Una línea exacta con el formato: Nota: N
-   - N debe ser un único dígito: ${scoreExamples} (número arábigo, no palabras)
-   - Prohibido omitir la nota, usar rangos, decimales o frases como "nota alta"
-3. **Justificación** — fundamentada en el Knowledge y la evidencia del proyecto
-4. **Posibles mejoras** — propuestas concretas y accionables
-
-La línea "Nota: N" debe aparecer en su propia línea, después del Análisis y antes de la Justificación.
-Ejemplo válido:
-**Análisis**
-(texto del análisis)
-
-Nota: 3
-
-**Justificación**
-(texto)
-
-Profundiza con detalle técnico del proyecto y del marco teórico sin inventar hechos.
-${
-  phaseInstructions.trim()
-    ? `\n\nOrientación adicional para esta evaluación:\n${phaseInstructions.trim()}`
-    : ""
-}
-
-No uses etiquetas <think>. Responde solo con la evaluación de esta subdimensión.`.trim();
+  const phaseBlock = formatOptionalPhaseInstructions(phaseInstructions);
+  const template =
+    evaluation.prompts.subdimensionUser?.trim() || DEFAULT_SUBDIMENSION_USER_PROMPT;
+  return applyPromptTemplate(template, {
+    dimension: dimension.name,
+    subdimension: subdimension.name,
+    scoreExamples,
+    knowledgeLabel: label,
+    phaseInstructions: phaseBlock,
+  });
 }
 
 async function collectStream(
@@ -158,28 +148,21 @@ type RagLlmPassParams = {
   knowledgeLabel: string;
   semaphore: EvaluateLlmSemaphore;
   precomputedKnowledgeChunks?: RetrievedChunk[];
+  subdimensionLabel: string;
 };
 
 async function runRagLlmPass(params: RagLlmPassParams): Promise<string> {
   return params.semaphore.run(async () => {
-    const systemContent = await buildSystemContext(params.evaluationTypeId, [], {
+    validateProjectElementsForEvaluation(params.projectElementsTable);
+
+    const systemMessage = await resolveEvaluateSystemContextWithRetry({
+      evaluationTypeId: params.evaluationTypeId,
       projectElementsTable: params.projectElementsTable,
-      projectElementsOnly: true,
-      excludeReportFormat: true,
-      contextMode: "evaluate",
       ragQuery: params.ragQuery,
       evaluateSubdimension: params.evaluateSubdimension,
-      agentArtifacts: params.precomputedKnowledgeChunks?.length
-        ? { ...createEmptyArtifacts(), knowledgeChunks: params.precomputedKnowledgeChunks }
-        : undefined,
+      precomputedKnowledgeChunks: params.precomputedKnowledgeChunks,
+      subdimensionLabel: params.subdimensionLabel,
     });
-
-    const noThink =
-      "Responde solo con el análisis de evaluación. No uses etiquetas <think>.\n\n";
-    const systemMessage =
-      noThink +
-      (systemContent ||
-        `Eres un evaluador de proyectos. Fundamenta el análisis en la rúbrica y ${params.knowledgeLabel}.`);
 
     return collectStream(
       [
@@ -189,60 +172,6 @@ async function runRagLlmPass(params: RagLlmPassParams): Promise<string> {
       params.maxTokens
     );
   });
-}
-
-function evaluationSummaryPrompt(
-  overallScore: number | null,
-  evaluation: EvaluationConfig,
-  summaryMaxChars: number
-): string {
-  const label = evaluation.indicatorLabel;
-  return `Redacta una SÍNTESIS FINAL DE LA EVALUACIÓN (máximo ${summaryMaxChars} caracteres).
-
-REGLAS OBLIGATORIAS:
-- NO describas el proyecto, su objetivo, beneficiarios ni actividades.
-- Resume el VEREDICTO evaluativo según la rúbrica ${label}: hallazgos evaluativos y conclusión.
-${overallScore != null ? `- Incluye la nota ${label} ponderada: ${formatIndicatorScore(overallScore)}.` : "- Si puedes inferir la conclusión global, hazlo sin inventar una nota numérica."}
-- Español claro, sin títulos, sin listas, sin markdown.
-- Solo el texto de la síntesis evaluativa.`.trim();
-}
-
-async function generateEvaluationSummaryText(
-  summaryInput: string,
-  overallScore: number | null,
-  schema: ReturnType<typeof buildRubricScoreSchemaFromConfig>,
-  scores: Record<string, number | null>,
-  evaluation: EvaluationConfig,
-  summaryMaxChars: number,
-  maxTokensOverride?: number,
-  semaphore?: EvaluateLlmSemaphore
-): Promise<string> {
-  const defaultSystem = `Eres evaluador ${evaluation.indicatorLabel}. Escribes síntesis evaluativas concisas. NUNCA describas el proyecto, sus objetivos ni actividades. Solo veredicto evaluativo.`;
-  let llmText = "";
-  const maxTokens = maxTokensOverride ?? evaluation.maxTokens.summary;
-  try {
-    llmText = await collectStream(
-      [
-        { role: "system", content: defaultSystem },
-        {
-          role: "user",
-          content: `${evaluationSummaryPrompt(overallScore, evaluation, summaryMaxChars)}\n\nDatos de evaluación (solo notas y conclusiones):\n${summaryInput.slice(0, 6000)}`,
-        },
-      ],
-      maxTokens,
-      semaphore
-    );
-  } catch {
-    llmText = "";
-  }
-  return finalizeEvaluationSummary(
-    llmText,
-    schema,
-    scores,
-    overallScore,
-    evaluation.indicatorLabel,
-    summaryMaxChars
-  );
 }
 
 type SubdimResult = {
@@ -310,7 +239,14 @@ async function evaluateSingleDimension(
   ): Promise<SubdimResult> => {
     const subQuery = buildSubdimensionKnowledgeQuery(dim, sub, ctx.projectElementsTable, ctx.topN);
     const scoreKey = subdimensionScoreKey(dim.name, sub.name);
-    const subAnalysis = await runRagLlmPass({
+    const userPrompt = subdimensionUserPrompt(
+      dim,
+      sub,
+      ctx.scoreScale,
+      ctx.evaluation,
+      ctx.phase.subdimensionEval
+    );
+    const passParams = {
       evaluationTypeId: ctx.evaluationTypeId,
       projectElementsTable: ctx.projectElementsTable,
       ragQuery: subQuery,
@@ -319,23 +255,110 @@ async function evaluateSingleDimension(
         name: sub.name,
         content: sub.content,
       },
-      userPrompt: subdimensionUserPrompt(
-        dim,
-        sub,
-        ctx.scoreScale,
-        ctx.evaluation,
-        ctx.phase.subdimensionEval
-      ),
+      userPrompt,
       maxTokens: ctx.evaluation.maxTokens.subdimension,
       knowledgeLabel: ctx.evaluation.knowledgeReferenceLabel,
       semaphore: ctx.semaphore,
       precomputedKnowledgeChunks: ctx.precomputedSubdimensionChunks?.[scoreKey],
+      subdimensionLabel: `${sub.name} (${dim.name})`,
+    };
+
+    let subAnalysis: string;
+    try {
+      subAnalysis = await runRagLlmPass(passParams);
+    } catch (err) {
+      const msg =
+        err instanceof EvaluateSystemContextError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : String(err);
+      throw new Error(`No se pudo evaluar la subdimensión «${sub.name}»: ${msg}`);
+    }
+
+    let qualityAttempt = 0;
+    while (
+      !isRawSubdimensionAnalysisComplete(subAnalysis) &&
+      qualityAttempt < MAX_SUBDIM_QUALITY_RETRIES
+    ) {
+      const issues = getRawSubdimensionAnalysisIssues(subAnalysis);
+      recordEvaluateSubdimAttempt({
+        dimension: dim.name,
+        subdimension: sub.name,
+        attempt: qualityAttempt,
+        acceptable: false,
+        issues,
+        chars: subAnalysis.length,
+      });
+      emit({
+        type: "step",
+        message: `Reintentando evaluación incompleta de «${sub.name}» (${issues.join(", ")})…`,
+      });
+      const retryPrompt = buildSubdimensionRetryPrompt(userPrompt, issues);
+      subAnalysis = await runRagLlmPass({ ...passParams, userPrompt: retryPrompt });
+      qualityAttempt++;
+    }
+
+    if (!isRawSubdimensionAnalysisComplete(subAnalysis)) {
+      const preRecoveryIssues = getRawSubdimensionAnalysisIssues(subAnalysis);
+      if (
+        preRecoveryIssues.length === 1 &&
+        preRecoveryIssues[0] === "missing_nota"
+      ) {
+        emit({
+          type: "step",
+          message: `Reintentando «${sub.name}»: falta línea «Nota: N»…`,
+        });
+        const recoveryPrompt = buildMissingNotaRecoveryPrompt(
+          userPrompt,
+          subAnalysis
+        );
+        subAnalysis = await runRagLlmPass({
+          ...passParams,
+          userPrompt: recoveryPrompt,
+        });
+      }
+    }
+
+    if (!isRawSubdimensionAnalysisComplete(subAnalysis)) {
+      const issues = getRawSubdimensionAnalysisIssues(subAnalysis);
+      recordEvaluateSubdimAttempt({
+        dimension: dim.name,
+        subdimension: sub.name,
+        attempt: qualityAttempt,
+        acceptable: false,
+        issues,
+        chars: subAnalysis.length,
+      });
+      logEvaluateSubdimSummary(dim.name, sub.name, "failed", issues);
+      throw new Error(
+        `Evaluación incompleta de la subdimensión «${sub.name}» (${dim.name}): ${issues.join(", ")}. Reintente la evaluación.`
+      );
+    }
+
+    logEvaluateSubdimSummary(dim.name, sub.name, "ok");
+
+    const parsedScore = parseSubdimensionScore(subAnalysis);
+    // Emitir nota apenas se parsea el JSON/texto de la subdimensión (antes del informe final).
+    emit({
+      type: "subdimension_score",
+      dimension: dim.name,
+      name: sub.name,
+      score: parsedScore,
     });
+    emit({
+      type: "subdimension",
+      dimension: dim.name,
+      name: sub.name,
+      index: j + 1,
+      total: subdims.length,
+    });
+
     return {
       j,
       sub,
       subAnalysis,
-      parsedScore: parseSubdimensionScore(subAnalysis),
+      parsedScore,
     };
   };
 
@@ -358,13 +381,6 @@ async function evaluateSingleDimension(
   for (const result of subdimResults) {
     const scoreKey = subdimensionScoreKey(dim.name, result.sub.name);
     subdimensionScores[scoreKey] = result.parsedScore;
-    emit({
-      type: "subdimension",
-      dimension: dim.name,
-      name: result.sub.name,
-      index: result.j + 1,
-      total: subdims.length,
-    });
   }
 
   const dimSections: string[] = [
@@ -422,14 +438,22 @@ export async function* runEvaluatePipeline(
     return;
   }
 
+  try {
+    validateProjectElementsForEvaluation(projectElementsTable);
+  } catch (err) {
+    yield {
+      type: "error",
+      error: err instanceof Error ? err.message : String(err),
+    };
+    return;
+  }
+
   const scoreScale = rubric.scoreScale;
-  const synthesisMax = getSynthesisMaxChars(reportFormat, rubric);
   const topN = evaluation.projectElementsInRagQuery;
   const phase = evaluation.phaseInstructions;
-  const scoreSchema = buildRubricScoreSchemaFromConfig(rubric);
   const subdimensionScores: Record<string, number | null> = {};
   const partialAnalyses: string[] = [];
-  const semaphore = new EvaluateLlmSemaphore();
+  const semaphore = getGlobalLlmSemaphore();
 
   const totalSubdims = rubric.dimensions.reduce((n, d) => n + d.subdimensions.length, 0);
 
@@ -509,121 +533,62 @@ export async function* runEvaluatePipeline(
 
   const rawEvaluation = partialAnalyses.join("\n\n---\n\n");
 
+  const scoreSchema = buildRubricScoreSchemaFromConfig(rubric);
+  const evaluationScoresPayload = buildEvaluationScoresPayload(
+    scoreSchema,
+    subdimensionScores,
+    evaluation.indicatorLabel
+  );
+
   yield {
-    type: "formatting",
-    message: "Redactando resúmenes e integrando evaluación según formato…",
+    type: "evaluation_scores",
+    payload: evaluationScoresPayload,
   };
 
-  // Borrador inmediato: si Vercel corta el formateo (p. ej. Hobby), el cliente ya tiene contenido.
   yield {
-    type: "report_content",
+    type: "formatting",
+    message: "Informe final: integrando evaluación y redactando secciones con IA…",
+  };
+
+  // Borrador: el cliente no lo trata como informe final exportable.
+  yield {
+    type: "report_draft",
     content: stripCharacterLimitAnnotations(rawEvaluation),
   };
 
-  const formatCustom = evaluation.prompts.formatInstructions?.trim();
+  let assembled: AssembleFinalReportResult | undefined;
 
-  const assembled = await collectAssembledReport({
+  for await (const event of assembleFinalPonderacionesReportEvents({
     rubric,
     reportFormat,
     rawEvaluation,
     projectElementsTable,
     evaluation,
-    formatInstructionsExtra: formatCustom,
-    semaphore,
-  });
-
-  let sanitized = stripCharacterLimitAnnotations(assembled);
-
-  const regexBackfill = backfillSubdimensionScores(scoreSchema, {}, [
-    rawEvaluation,
-    sanitized,
-  ]);
-
-  const rawDeterministicScores: Record<string, number | null> = {};
-  for (const entry of scoreSchema) {
-    rawDeterministicScores[entry.key] = parseSubdimensionScoreFromNamedSection(
-      rawEvaluation,
-      entry.dimension,
-      entry.name
-    );
+    subdimensionScores: evaluationScoresPayload.subdimensionScores,
+    overallScore: evaluationScoresPayload.overallScore,
+  })) {
+    if (event.type === "step") {
+      yield { type: "step", message: event.message };
+    } else {
+      assembled = event.result;
+    }
   }
 
-  Object.assign(
-    subdimensionScores,
-    mergeAuthoritativeScores(scoreSchema, {}, [
-      subdimensionScores,
-      rawDeterministicScores,
-      regexBackfill,
-    ])
-  );
-
-  for (const entry of scoreSchema) {
-    const score = subdimensionScores[entry.key];
-    yield {
-      type: "subdimension_score",
-      dimension: entry.dimension,
-      name: entry.name,
-      score,
-    };
+  if (!assembled) {
+    throw new Error("El ensamblado del informe no produjo resultado.");
   }
 
-  const overallScore = computeWeightedIndicatorScore(scoreSchema, subdimensionScores);
-
-  if (synthesisMax != null && synthesisMax > 0) {
-    yield {
-      type: "step",
-      message: "Generando síntesis evaluativa final…",
-    };
-
-    const summaryInput = buildEvaluationInputForSummary(
-      rawEvaluation,
-      sanitized,
-      scoreSchema,
-      subdimensionScores
-    );
-    const synSection = findCustomSectionByTitlePattern(
-      reportFormat,
-      /síntesis|sintesis/i
-    );
-    const evaluationSummary = synSection
-      ? await generateFinalSynthesisSection({
-          synSection,
-          rubric,
-          evaluation,
-          rawEvaluation,
-          scoreSchema,
-          subdimensionScores,
-          overallScore,
-          semaphore,
-        })
-      : await generateEvaluationSummaryText(
-          summaryInput,
-          overallScore,
-          scoreSchema,
-          subdimensionScores,
-          evaluation,
-          synthesisMax,
-          evaluation.maxTokens.summary,
-          semaphore
-        );
-    yield { type: "evaluation_summary", text: evaluationSummary.replace(/^##\s*[^\n]+\n+/, "").trim() };
-
-    sanitized = `${sanitized.trimEnd()}\n\n${evaluationSummary.trim()}`;
+  if (assembled.evaluationSummary.trim()) {
+    yield { type: "evaluation_summary", text: assembled.evaluationSummary };
   }
 
-  const finalReport = injectAuthoritativeScoresSection(
-    sanitized,
-    scoreSchema,
-    subdimensionScores,
-    overallScore,
-    evaluation.indicatorLabel
-  );
-  yield { type: "report_content", content: finalReport };
+  yield { type: "report_content", content: assembled.finalReport };
 
+  // Índice IGIP solo al cerrar el informe final (las notas por subdimensión ya se emitieron en vivo).
   yield {
     type: "scores_summary",
-    subdimensionScores: { ...subdimensionScores },
-    overallScore,
+    subdimensionScores: { ...assembled.subdimensionScores },
+    overallScore: assembled.overallScore,
   };
 
   yield { type: "done" };

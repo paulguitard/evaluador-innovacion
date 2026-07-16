@@ -6,20 +6,11 @@ import {
 import type { ElementDef } from "@/lib/excel-heuristics";
 import { executeProjectExtractTool } from "@/lib/project-extract-tools";
 import { finalizeContentForElement } from "@/lib/extract-content-clean";
+import { DEFAULT_EXTRACT_SYSTEM_PROMPT, applyPromptTemplate } from "@/lib/eval-types/prompt-defaults";
+import type { ExtractConfig } from "@/lib/evaluation-type-settings";
+import { getExtractRunContext } from "@/lib/extract-run-context";
 
-const EXTRACT_SYSTEM_PROMPT = `Eres un extractor de información de proyectos de innovación.
-
-Tu tarea es identificar y redactar el contenido de UN elemento concreto del proyecto, usando las herramientas para buscar en todo el documento.
-
-Reglas:
-- Usa el título y la descripción del elemento como guía semántica (no busques solo coincidencia literal del título).
-- Busca en todo el proyecto: tablas, párrafos, secciones y hojas Excel.
-- En bitácoras Excel, revisa get_structured_excel en la hoja "Resumen Proyecto": metadata (Sede, Escuelas) en filas superiores; preguntas largas en filas inferiores.
-- Puedes sintetizar información dispersa en varias partes del documento.
-- Prioriza fidelidad al documento; no inventes datos que no aparezcan en las fuentes.
-- Para nivel de avance: no confundas fases planificadas con ejecución real; respeta expresiones como "nace desde cero" o "sin financiamiento previo".
-- Si no hay evidencia suficiente, devuelve content vacío.
-- Cuando termines de buscar, responde ÚNICAMENTE JSON: {"content":"...","confidence":"high|medium|low"}`;
+export const EXTRACT_SYSTEM_PROMPT_DEFAULT = DEFAULT_EXTRACT_SYSTEM_PROMPT;
 
 export const PROJECT_EXTRACT_TOOL_DEFINITIONS: OpenAIToolDef[] = [
   {
@@ -82,8 +73,42 @@ export const PROJECT_EXTRACT_TOOL_DEFINITIONS: OpenAIToolDef[] = [
   },
 ];
 
-const MAX_TOOL_ITERATIONS = 5;
 const DEFAULT_ELEMENT_TIMEOUT_MS = 45_000;
+
+function resolveAgentConfig(extractConfig?: ExtractConfig) {
+  const cfg = extractConfig ?? getExtractRunContext();
+  const agent = cfg?.agent;
+  return {
+    maxToolIterations: agent?.maxToolIterations ?? 5,
+    maxTokens: agent?.maxTokens ?? 4096,
+    temperature: agent?.temperature ?? 0.15,
+    userPromptTemplate: agent?.userPromptTemplate,
+    fallbackTopK: agent?.fallbackTopK ?? 16,
+    fallbackMaxRetrievedChars: agent?.fallbackMaxRetrievedChars ?? 20_000,
+  };
+}
+
+function buildUserPrompt(
+  element: ElementDef,
+  extraHints: string | undefined,
+  template: string | undefined
+): string {
+  const tpl = template?.trim();
+  if (tpl) {
+    return applyPromptTemplate(tpl, {
+      title: element.title,
+      section: element.section ?? "General",
+      description: element.description,
+      extraHints: extraHints?.trim() ? `\n${extraHints.trim()}` : "",
+    });
+  }
+  return `Elemento a extraer: "${element.title}"
+Sección: ${element.section ?? "General"}
+Descripción de qué buscar: ${element.description}
+${extraHints ?? ""}
+
+Usa las herramientas para buscar en todo el proyecto. Cuando tengas suficiente información, responde con JSON {"content":"...","confidence":"high|medium|low"}.`;
+}
 
 function parseExtractJson(raw: string): { content: string; confidence: string } {
   const trimmed = raw.trim();
@@ -109,26 +134,25 @@ export type ExtractElementLlmResult = {
 async function runExtractAgentLoop(
   sessionId: string,
   element: ElementDef,
-  extraHints?: string
+  extraHints?: string,
+  systemPrompt?: string,
+  extractConfig?: ExtractConfig
 ): Promise<ExtractElementLlmResult> {
-  const userPrompt = `Elemento a extraer: "${element.title}"
-Sección: ${element.section ?? "General"}
-Descripción de qué buscar: ${element.description}
-${extraHints ?? ""}
+  const agentCfg = resolveAgentConfig(extractConfig);
+  const userPrompt = buildUserPrompt(element, extraHints, agentCfg.userPromptTemplate);
 
-Usa las herramientas para buscar en todo el proyecto. Cuando tengas suficiente información, responde con JSON {"content":"...","confidence":"high|medium|low"}.`;
-
+  const system = systemPrompt?.trim() || DEFAULT_EXTRACT_SYSTEM_PROMPT;
   type ToolMessage = Parameters<typeof chatCompletionWithTools>[0][number];
   const messages: ToolMessage[] = [
-    { role: "system", content: EXTRACT_SYSTEM_PROMPT },
+    { role: "system", content: system },
     { role: "user", content: userPrompt },
   ];
 
-  for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+  for (let i = 0; i < agentCfg.maxToolIterations; i++) {
     const { content, toolCalls } = await chatCompletionWithTools(
       messages,
       PROJECT_EXTRACT_TOOL_DEFINITIONS,
-      { max_tokens: 4096, temperature: 0.15, useCase: "extract" }
+      { max_tokens: agentCfg.maxTokens, temperature: agentCfg.temperature, useCase: "extract" }
     );
 
     if (toolCalls.length > 0) {
@@ -184,14 +208,22 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 export async function extractElementLlmFirst(
   sessionId: string,
   element: ElementDef,
-  options?: { timeoutMs?: number; extraHints?: string }
+  options?: {
+    timeoutMs?: number;
+    extraHints?: string;
+    systemPrompt?: string;
+    extractConfig?: ExtractConfig;
+  }
 ): Promise<ExtractElementLlmResult> {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_ELEMENT_TIMEOUT_MS;
   const extraHints = options?.extraHints ?? "";
+  const systemPrompt = options?.systemPrompt;
+  const extractConfig = options?.extractConfig ?? getExtractRunContext();
+  const agentCfg = resolveAgentConfig(extractConfig);
 
   try {
     const result = await withTimeout(
-      runExtractAgentLoop(sessionId, element, extraHints),
+      runExtractAgentLoop(sessionId, element, extraHints, systemPrompt, extractConfig),
       timeoutMs,
       element.title
     );
@@ -205,22 +237,23 @@ export async function extractElementLlmFirst(
       "@/lib/project-rag-retrieve"
     );
     const chunks = await retrieveProjectChunksMulti(sessionId, fallbackQueries, {
-      topK: 16,
-      maxRetrievedChars: 20_000,
+      topK: agentCfg.fallbackTopK,
+      maxRetrievedChars: agentCfg.fallbackMaxRetrievedChars,
     });
     if (chunks.length === 0) {
       return { content: "", method: "llm_first:timeout", confidence: "low" };
     }
     const context = formatProjectChunksForPrompt(chunks);
+    const system = systemPrompt?.trim() || DEFAULT_EXTRACT_SYSTEM_PROMPT;
     const response = await chatCompletion(
       [
-        { role: "system", content: EXTRACT_SYSTEM_PROMPT },
+        { role: "system", content: system },
         {
           role: "user",
           content: `Elemento: "${element.title}"\nDescripción: ${element.description}${extraHints ? `\n${extraHints}` : ""}\n\nFragmentos:\n${context}\n\nResponde JSON.`,
         },
       ],
-      { max_tokens: 4096, temperature: 0.1, useCase: "extract" }
+      { max_tokens: agentCfg.maxTokens, temperature: Math.min(agentCfg.temperature, 0.1), useCase: "extract" }
     );
     const parsed = parseExtractJson(response?.trim() ?? "");
     const content = finalizeContentForElement(parsed.content, element);

@@ -38,7 +38,7 @@ export const DEFAULT_LLM_PARAMS: Record<LlmUseCase, LlmUseCaseParams> = {
   chat: { temperature: 0.3, max_tokens: 8192 },
   router: { temperature: 0.1, max_tokens: 900 },
   agent: { temperature: 0.2, max_tokens: 1024 },
-  evaluate: { temperature: 0.3, max_tokens: 8192 },
+  evaluate: { temperature: 0, max_tokens: 8192 },
   extract: { temperature: 0.1, max_tokens: 4096 },
   vision: { temperature: 0.2, max_tokens: 2048 },
   embeddings: { temperature: 0, max_tokens: 0 },

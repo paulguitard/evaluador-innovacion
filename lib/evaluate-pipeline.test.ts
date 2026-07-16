@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { EvaluateLlmSemaphore } from "@/lib/evaluate-concurrency";
+import {
+  EvaluateLlmSemaphore,
+  getGlobalLlmSemaphore,
+  GLOBAL_MAX_CONCURRENT_LLM,
+} from "@/lib/evaluate-concurrency";
 
 describe("evaluate-concurrency", () => {
   it("limits concurrent runs to max", async () => {
@@ -18,5 +22,12 @@ describe("evaluate-concurrency", () => {
 
     await Promise.all([task(), task(), task(), task()]);
     assert.equal(peak, 2);
+  });
+
+  it("getGlobalLlmSemaphore devuelve singleton con tope GLOBAL_MAX_CONCURRENT_LLM", () => {
+    const a = getGlobalLlmSemaphore();
+    const b = getGlobalLlmSemaphore();
+    assert.equal(a, b);
+    assert.equal(GLOBAL_MAX_CONCURRENT_LLM, 8);
   });
 });

@@ -1,5 +1,23 @@
 import type { ContextMode } from "@/lib/rag-limits";
 import { CONTEXT_LIMITS } from "@/lib/rag-limits";
+import { isImet } from "@/lib/eval-types/constants";
+import {
+  DEFAULT_EXTRACT_SYSTEM_PROMPT,
+  DEFAULT_EXTRACT_SYSTEM_PROMPT_IMET,
+} from "@/lib/eval-types/prompt-defaults";
+import {
+  defaultExtractAgentConfig,
+  defaultExtractDuplicateGuardConfig,
+  defaultExtractHeuristicConfig,
+  defaultExtractHintOverrides,
+  defaultExtractProjectIndexConfig,
+  defaultExtractProjectRetrieveConfig,
+  defaultExtractRetryConfig,
+  defaultExtractVisionConfig,
+  buildExtractTypeSpecificDefaults,
+  DEFAULT_GANTT_STRUCTURE_PROMPT,
+  DEFAULT_INDICATORS_STRUCTURE_PROMPT,
+} from "@/lib/eval-types/extract-config-defaults";
 
 export type ExtractMethod =
   | "heuristic"
@@ -40,7 +58,6 @@ export type PipelineConfig = {
     scoreJson: number;
     summary: number;
   };
-  dimensionLabels: string[];
   prompts: PipelinePromptOverrides;
 };
 
@@ -60,10 +77,61 @@ export type RagConfig = {
   modes: Partial<Record<ContextMode, RagModeOverride>>;
 };
 
+export type ExtractPromptOverrides = {
+  /** System prompt del agente de extracción LLM+tools. Vacío = default IGIP/IMET en código. */
+  system?: string;
+};
+
+export type ExtractAgentConfig = {
+  maxToolIterations: number;
+  maxTokens: number;
+  temperature: number;
+  /** Placeholders: {{title}}, {{section}}, {{description}}, {{extraHints}} */
+  userPromptTemplate: string;
+  fallbackTopK: number;
+  fallbackMaxRetrievedChars: number;
+  toolSearchTopK: number;
+  toolSearchMaxRetrievedChars: number;
+};
+
+export type ExtractProjectIndexConfig = {
+  chunkSizeChars: number;
+  overlapChars: number;
+};
+
+export type ExtractProjectRetrieveConfig = {
+  topK: number;
+  maxRetrievedChars: number;
+  neighborWindow: number;
+};
+
+export type ExtractDuplicateGuardConfig = {
+  minCompareChars: number;
+  similarityThreshold: number;
+  /** Placeholders: {{elementTitle}}, {{otherTitles}}, {{preview}} */
+  retryHintBody: string;
+};
+
+export type ExtractRetryConfig = {
+  emptyRetryExtraTimeoutMs: number;
+};
+
+export type ExtractHeuristicConfig = {
+  highConfidenceMin: number;
+  minUsableConfidence: number;
+};
+
+export type ExtractVisionConfig = {
+  indexPrompt: string;
+};
+
+export type ExtractHintOverrides = {
+  mandatoryRetryIgip: string;
+  mandatoryRetryImet: string;
+};
+
 export type ExtractConfig = {
   elementTimeoutMs: number;
-  mandatoryLlmRetryHint: string;
-  globalLlmHints: string;
   sheetPatterns: {
     gantt: string;
     indicators: string;
@@ -73,6 +141,15 @@ export type ExtractConfig = {
     gantt: string;
     indicators: string;
   };
+  prompts?: ExtractPromptOverrides;
+  agent: ExtractAgentConfig;
+  projectIndex: ExtractProjectIndexConfig;
+  projectRetrieve: ExtractProjectRetrieveConfig;
+  duplicateGuard: ExtractDuplicateGuardConfig;
+  retry: ExtractRetryConfig;
+  heuristics: ExtractHeuristicConfig;
+  vision: ExtractVisionConfig;
+  hintOverrides: ExtractHintOverrides;
 };
 
 export type EvaluationTypeSettings = {
@@ -80,35 +157,6 @@ export type EvaluationTypeSettings = {
   rag: RagConfig;
   extract: ExtractConfig;
 };
-
-const DEFAULT_GANTT_STRUCTURE_PROMPT = `Eres un asistente que estructura la carta Gantt / plan de actividades de proyectos.
-
-Recibirás datos de la hoja Excel con nombres y descripciones de actividades.
-
-REGLAS OBLIGATORIAS:
-- Lista numerada (1, 2, 3…) con una actividad por bloque.
-- Cada actividad incluye ÚNICAMENTE:
-  • Nombre de la actividad
-  • Descripción de la actividad
-- NO incluyas: tareas, subtareas, responsables, fechas, duración, % avance, evidencias ni columnas extra.
-- NO copies párrafos de desarrollo técnico ni texto de otras hojas.
-- NO inventes actividades; solo usa los datos proporcionados.
-- Omite encabezados de tabla, filas vacías y filas de subtareas ("Tareas:").
-- Respeta la descripción del elemento configurada por el usuario.
-- Responde ÚNICAMENTE JSON: {"content":"...","confidence":"high|medium|low"}`;
-
-const DEFAULT_INDICATORS_STRUCTURE_PROMPT = `Eres un asistente que estructura tablas de indicadores de proyectos.
-
-Recibirás datos crudos de la hoja Excel "Indicadores" (filas con etiquetas de columna).
-Tu tarea es reescribirlos de forma clara y legible para un evaluador humano.
-
-REGLAS DE FORMATO:
-- Un bloque numerado por cada indicador (1, 2, 3…).
-- Dentro de cada bloque usa etiquetas en líneas separadas.
-- NO uses pipes (|), tablas de una sola línea ni listas compactas ilegibles.
-- NO inventes datos; solo reorganiza fielmente lo que aparece en los datos crudos.
-- Omite campos vacíos.
-- Responde ÚNICAMENTE JSON: {"content":"...","confidence":"high|medium|low"}`;
 
 export function defaultPipelineConfig(indicatorLabel = "IGIP"): PipelineConfig {
   return {
@@ -123,12 +171,6 @@ export function defaultPipelineConfig(indicatorLabel = "IGIP"): PipelineConfig {
       scoreJson: 1024,
       summary: 600,
     },
-    dimensionLabels: [
-      "Novedad",
-      "Potencial de impacto",
-      "Escalabilidad",
-      "Resultado final",
-    ],
     prompts: {},
   };
 }
@@ -164,11 +206,6 @@ export function defaultRagConfig(): RagConfig {
 export function defaultExtractConfig(): ExtractConfig {
   return {
     elementTimeoutMs: 45_000,
-    mandatoryLlmRetryHint: `
-
-IMPORTANTE: Este campo NO puede quedar vacío. Usa las herramientas para revisar todo el proyecto (hoja Resumen Proyecto, Gantt, Indicadores, PDF). Si no encuentras el texto exacto del título, busca por la descripción del elemento y sinónimos.`,
-    globalLlmHints:
-      'En bitácoras Excel, busca en la tabla superior (columna A/B) etiquetas como "Sede", "Escuelas", "Carreras". El valor suele estar en la columna adyacente.',
     sheetPatterns: {
       gantt: "gantt|cronograma|carta\\s*gantt|plan\\s+de\\s+actividad",
       indicators: "indicador",
@@ -178,6 +215,17 @@ IMPORTANTE: Este campo NO puede quedar vacío. Usa las herramientas para revisar
       gantt: DEFAULT_GANTT_STRUCTURE_PROMPT,
       indicators: DEFAULT_INDICATORS_STRUCTURE_PROMPT,
     },
+    prompts: {
+      system: "",
+    },
+    agent: defaultExtractAgentConfig(),
+    projectIndex: defaultExtractProjectIndexConfig(),
+    projectRetrieve: defaultExtractProjectRetrieveConfig(),
+    duplicateGuard: defaultExtractDuplicateGuardConfig(),
+    retry: defaultExtractRetryConfig(),
+    heuristics: defaultExtractHeuristicConfig(),
+    vision: defaultExtractVisionConfig(),
+    hintOverrides: defaultExtractHintOverrides(),
   };
 }
 
@@ -226,9 +274,6 @@ function mergePipelineConfig(
       scoreJson: clamp(Number(raw.maxTokens?.scoreJson ?? base.maxTokens.scoreJson), 256, 16_000),
       summary: clamp(Number(raw.maxTokens?.summary ?? base.maxTokens.summary), 128, 16_000),
     },
-    dimensionLabels: Array.isArray(raw.dimensionLabels)
-      ? raw.dimensionLabels.filter((l): l is string => typeof l === "string" && !!l.trim())
-      : base.dimensionLabels,
     prompts: {
       scoreJsonSystem:
         typeof raw.prompts?.scoreJsonSystem === "string" ? raw.prompts.scoreJsonSystem : "",
@@ -287,17 +332,27 @@ function mergeRagConfig(raw: Partial<RagConfig> | null | undefined): RagConfig {
   };
 }
 
-function mergeExtractConfig(raw: Partial<ExtractConfig> | null | undefined): ExtractConfig {
+function baseExtractForType(typeName?: string): ExtractConfig {
   const base = defaultExtractConfig();
+  const typed = buildExtractTypeSpecificDefaults(typeName);
+  const system = isImet(typeName)
+    ? DEFAULT_EXTRACT_SYSTEM_PROMPT_IMET
+    : DEFAULT_EXTRACT_SYSTEM_PROMPT;
+  return {
+    ...base,
+    ...typed,
+    prompts: { system },
+  };
+}
+
+function mergeExtractConfig(
+  raw: Partial<ExtractConfig> | null | undefined,
+  typeName?: string
+): ExtractConfig {
+  const base = baseExtractForType(typeName);
   if (!raw || typeof raw !== "object") return base;
   return {
     elementTimeoutMs: clamp(Number(raw.elementTimeoutMs ?? base.elementTimeoutMs), 5000, 300_000),
-    mandatoryLlmRetryHint:
-      typeof raw.mandatoryLlmRetryHint === "string"
-        ? raw.mandatoryLlmRetryHint
-        : base.mandatoryLlmRetryHint,
-    globalLlmHints:
-      typeof raw.globalLlmHints === "string" ? raw.globalLlmHints : base.globalLlmHints,
     sheetPatterns: {
       gantt:
         typeof raw.sheetPatterns?.gantt === "string"
@@ -322,6 +377,116 @@ function mergeExtractConfig(raw: Partial<ExtractConfig> | null | undefined): Ext
           ? raw.structurePrompts.indicators
           : base.structurePrompts.indicators,
     },
+    prompts: {
+      system: (() => {
+        const custom =
+          typeof raw.prompts?.system === "string" ? raw.prompts.system.trim() : "";
+        return custom || base.prompts?.system || "";
+      })(),
+    },
+    agent: {
+      maxToolIterations: clamp(
+        Number(raw.agent?.maxToolIterations ?? base.agent.maxToolIterations),
+        1,
+        20
+      ),
+      maxTokens: clamp(Number(raw.agent?.maxTokens ?? base.agent.maxTokens), 256, 32_768),
+      temperature: clamp(Number(raw.agent?.temperature ?? base.agent.temperature), 0, 1),
+      userPromptTemplate:
+        typeof raw.agent?.userPromptTemplate === "string" && raw.agent.userPromptTemplate.trim()
+          ? raw.agent.userPromptTemplate
+          : base.agent.userPromptTemplate,
+      fallbackTopK: clamp(Number(raw.agent?.fallbackTopK ?? base.agent.fallbackTopK), 1, 50),
+      fallbackMaxRetrievedChars: clamp(
+        Number(raw.agent?.fallbackMaxRetrievedChars ?? base.agent.fallbackMaxRetrievedChars),
+        1000,
+        100_000
+      ),
+      toolSearchTopK: clamp(Number(raw.agent?.toolSearchTopK ?? base.agent.toolSearchTopK), 1, 50),
+      toolSearchMaxRetrievedChars: clamp(
+        Number(raw.agent?.toolSearchMaxRetrievedChars ?? base.agent.toolSearchMaxRetrievedChars),
+        1000,
+        100_000
+      ),
+    },
+    projectIndex: {
+      chunkSizeChars: clamp(
+        Number(raw.projectIndex?.chunkSizeChars ?? base.projectIndex.chunkSizeChars),
+        200,
+        8000
+      ),
+      overlapChars: clamp(
+        Number(raw.projectIndex?.overlapChars ?? base.projectIndex.overlapChars),
+        0,
+        2000
+      ),
+    },
+    projectRetrieve: {
+      topK: clamp(Number(raw.projectRetrieve?.topK ?? base.projectRetrieve.topK), 1, 50),
+      maxRetrievedChars: clamp(
+        Number(raw.projectRetrieve?.maxRetrievedChars ?? base.projectRetrieve.maxRetrievedChars),
+        1000,
+        100_000
+      ),
+      neighborWindow: clamp(
+        Number(raw.projectRetrieve?.neighborWindow ?? base.projectRetrieve.neighborWindow),
+        0,
+        5
+      ),
+    },
+    duplicateGuard: {
+      minCompareChars: clamp(
+        Number(raw.duplicateGuard?.minCompareChars ?? base.duplicateGuard.minCompareChars),
+        20,
+        500
+      ),
+      similarityThreshold: clamp(
+        Number(raw.duplicateGuard?.similarityThreshold ?? base.duplicateGuard.similarityThreshold),
+        0.5,
+        1
+      ),
+      retryHintBody:
+        typeof raw.duplicateGuard?.retryHintBody === "string" && raw.duplicateGuard.retryHintBody.trim()
+          ? raw.duplicateGuard.retryHintBody
+          : base.duplicateGuard.retryHintBody,
+    },
+    retry: {
+      emptyRetryExtraTimeoutMs: clamp(
+        Number(raw.retry?.emptyRetryExtraTimeoutMs ?? base.retry.emptyRetryExtraTimeoutMs),
+        0,
+        120_000
+      ),
+    },
+    heuristics: {
+      highConfidenceMin: clamp(
+        Number(raw.heuristics?.highConfidenceMin ?? base.heuristics.highConfidenceMin),
+        0.1,
+        1
+      ),
+      minUsableConfidence: clamp(
+        Number(raw.heuristics?.minUsableConfidence ?? base.heuristics.minUsableConfidence),
+        0.1,
+        1
+      ),
+    },
+    vision: {
+      indexPrompt:
+        typeof raw.vision?.indexPrompt === "string" && raw.vision.indexPrompt.trim()
+          ? raw.vision.indexPrompt
+          : base.vision.indexPrompt,
+    },
+    hintOverrides: {
+      mandatoryRetryIgip:
+        typeof raw.hintOverrides?.mandatoryRetryIgip === "string" &&
+        raw.hintOverrides.mandatoryRetryIgip.trim()
+          ? raw.hintOverrides.mandatoryRetryIgip
+          : base.hintOverrides.mandatoryRetryIgip,
+      mandatoryRetryImet:
+        typeof raw.hintOverrides?.mandatoryRetryImet === "string" &&
+        raw.hintOverrides.mandatoryRetryImet.trim()
+          ? raw.hintOverrides.mandatoryRetryImet
+          : base.hintOverrides.mandatoryRetryImet,
+    },
   };
 }
 
@@ -340,7 +505,7 @@ export function mergeEvaluationTypeSettings(
       label
     ),
     rag: mergeRagConfig(raw?.rag_config as Partial<RagConfig> | undefined),
-    extract: mergeExtractConfig(raw?.extract_config as Partial<ExtractConfig> | undefined),
+    extract: mergeExtractConfig(raw?.extract_config as Partial<ExtractConfig> | undefined, label),
   };
 }
 

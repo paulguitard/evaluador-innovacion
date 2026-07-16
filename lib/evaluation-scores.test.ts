@@ -49,7 +49,19 @@ describe("parseSubdimensionScore", () => {
     assert.equal(parseSubdimensionScore("Nota: 4"), 4);
     assert.equal(parseSubdimensionScore("Nota asignada: 2"), 2);
     assert.equal(parseSubdimensionScore("Calificación: 3"), 3);
+    assert.equal(parseSubdimensionScore("nota de 2"), 2);
     assert.equal(parseSubdimensionScore("**Nota**\n2\nJustificación"), 2);
+    // Casos observados en producción: modelo devuelve markdown inline con asteriscos rodeando también los dos puntos
+    assert.equal(
+      parseSubdimensionScore("… requerida para la nota 4. **Nota:** 3 **Justificación**"),
+      3,
+      "debe parsear **Nota:** N inline en un párrafo"
+    );
+    assert.equal(
+      parseSubdimensionScore("Contexto previo. **Nota: 2** **Justificación**"),
+      2,
+      "debe parsear **Nota: N** con asteriscos rodeando la nota completa"
+    );
     assert.equal(parseSubdimensionScore("Análisis sin nota"), null);
     assert.equal(parseSubdimensionScore("Nota: 5"), null);
   });
@@ -266,7 +278,8 @@ Contribución Social, Ambiental o Productivo: 2
     assert.ok(!fixed.includes("2.7"));
     assert.match(fixed, /\*\*Índice IGIP\*\*: 2\.83/);
     assert.doesNotMatch(fixed, /Índice IGIP[\s\S]*Índice IGIP/);
-    assert.match(fixed, /ponderación 25%/);
+    assert.match(fixed, /\| Subdimensión \| Nota \|/);
+    assert.match(fixed, /\| Grado de Originalidad de la Idea \| 4 \|/);
   });
 
   it("reemplaza sección «Notas e índice» del formateo §6", () => {
@@ -289,6 +302,7 @@ Estado del arte: 3 (ponderación 0.10)
     assert.doesNotMatch(fixed, /ponderación 0\.15/);
     assert.doesNotMatch(fixed, /2\.55/);
     assert.match(fixed, /\*\*Notas e índice\*\*/);
+    assert.match(fixed, /\| Subdimensión \| Nota \|/);
     assert.match(fixed, /\*\*Índice IGIP\*\*: 3\.00/);
     assert.doesNotMatch(fixed, /Notas e índice[\s\S]*Notas e índice/);
   });

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   collectAssembledReport,
   countSubdimensionTitleOccurrences,
+  extractSubdimensionBodyFromFormattedBlock,
   formatSubdimensionBlock,
   isSynthesisSection,
 } from "@/lib/assemble-formatted-report";
@@ -80,6 +81,32 @@ Justificación fundamentada en Oslo Manual.
     assert.match(block, /Nota: 3/);
     assert.match(block, /Posibles mejoras/);
     assert.doesNotMatch(block, /### Subdimensión:/);
+  });
+
+  it("formatSubdimensionBlock no aplica clamp: cuerpo final === borrador", () => {
+    const longBody = `${"Análisis detallado. ".repeat(80)}
+
+Nota: 4
+
+Justificación extensa del Knowledge. ${"Más detalle. ".repeat(40)}
+
+Posibles mejoras
+1. Mejora A con mucho texto adicional para superar límites tipicos del §6.
+2. Mejora B igualmente detallada.`;
+    const longRaw = `## Dimensión: Novedad
+
+### Subdimensión: ${sub.name}
+
+${longBody}`;
+    const sections = expandReportSections(rubric, defaultReportFormatPonderaciones(rubric));
+    const section = sections.find(
+      (s) => s.kind === "subdimension_eval" && s.subdimensionId === sub.id
+    );
+    assert.ok(section);
+    const block = formatSubdimensionBlock(section!, rubric, longRaw);
+    const body = extractSubdimensionBodyFromFormattedBlock(block, sub.name);
+    assert.equal(body, longBody.trim());
+    assert.ok(body.length > 1500);
   });
 
   it("collectAssembledReport no trunca resúmenes de dimensión", async () => {

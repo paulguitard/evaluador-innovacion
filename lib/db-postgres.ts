@@ -315,18 +315,21 @@ export async function createEvaluationTypePostgres(name: string): Promise<number
   await ensureDb();
   const sql = getSql();
   const typeName = name.trim() || "IGIP";
-  const defaults = defaultEvaluationTypeSettings(typeName);
-  const rubric = mergeRubricConfig({}, typeName);
-  const reportFormat = mergeReportFormatConfig({}, rubric);
+  const { defaultsForType } = await import("@/lib/eval-types/defaults-for-type");
+  const defs = defaultsForType(typeName);
+  const rubric = defs.rubric;
+  const reportFormat = defs.reportFormat;
   const evaluationConfig = mergeEvaluationConfig(
     {
-      pipeline_config: defaults.pipeline,
+      evaluation_config: defs.evaluation,
+      pipeline_config: defs.typeSettings.pipeline,
       report_format_config: reportFormat,
-      rag_config: defaults.rag,
+      rag_config: defs.typeSettings.rag,
+      rubric_config: rubric,
     },
     typeName
   );
-  const rows = (await sql`INSERT INTO evaluation_types (name) VALUES (${name}) RETURNING id`) as unknown as {
+  const rows = (await sql`INSERT INTO evaluation_types (name) VALUES (${typeName}) RETURNING id`) as unknown as {
     id: unknown;
   }[];
   const id = Number(rows[0].id);
@@ -340,9 +343,9 @@ export async function createEvaluationTypePostgres(name: string): Promise<number
       ${sql.json(rubric)},
       ${sql.json(reportFormat)},
       ${sql.json(evaluationConfig)},
-      ${sql.json(defaults.pipeline)},
-      ${sql.json(defaults.rag)},
-      ${sql.json(defaults.extract)}
+      ${sql.json(defs.typeSettings.pipeline)},
+      ${sql.json(defs.typeSettings.rag)},
+      ${sql.json(defs.extract)}
     )
   `;
   return id;
@@ -459,6 +462,7 @@ export async function updateConfigPostgres(evaluationTypeId: number, data: Confi
       pipeline_config: merged.pipeline,
       report_format_config: mergedReportFormat,
       rag_config: merged.rag,
+      rubric_config: mergedRubric,
     },
     typeName
   );

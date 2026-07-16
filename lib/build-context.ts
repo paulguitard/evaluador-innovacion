@@ -95,10 +95,14 @@ export type BuildSystemContextOptions = {
   onRetrievedChunks?: (chunks: RetrievedChunk[]) => void;
   /** Emite pasos observables durante la construcción del contexto (chat). */
   onStreamEvent?: (event: BuildContextStreamEvent) => void;
+  /** Caracteres adicionales inyectados fuera de buildSystemContext (p. ej. evaluación masiva). */
+  supplementalContextChars?: number;
   /** Plan del agente (chat): qué secciones incluir en el prompt. */
   contextPlan?: ContextPlan;
   /** Datos recopilados por herramientas del agente (Nivel B/C). */
   agentArtifacts?: AgentArtifacts;
+  /** En evaluate: fallar si el contexto superaría maxSystemChars en lugar de truncar. */
+  strictEvaluate?: boolean;
 };
 
 function buildDefaultRagQuery(
@@ -403,9 +407,13 @@ export async function buildSystemContext(
     ...(includeFormatInSummary
       ? ["**Formato del informe:**", reportFormat ? reportFormat : "Vacío. No hay formato de informe configurado.", ""]
       : []),
-    "**Rúbrica:**",
-    rubricText ? "Configurada (ver sección 'Rúbrica y criterios de evaluación' más abajo)." : "No configurada.",
-    "",
+    ...(includeFormatInSummary
+      ? [
+          "**Rúbrica:**",
+          rubricText ? "Configurada (ver sección 'Rúbrica y criterios de evaluación' más abajo)." : "No configurada.",
+          "",
+        ]
+      : []),
     "**Elementos a identificar en el proyecto** (lo que se extrae y se muestra en 'Proyecto extraído'):",
     elementsConfigText,
     "",
@@ -450,6 +458,18 @@ export async function buildSystemContext(
   }
 
   const artifactProject = options?.agentArtifacts?.projectElements ?? [];
+  const bulkSnippets = options?.agentArtifacts?.bulkProjectSnippets ?? [];
+  if (bulkSnippets.length > 0) {
+    parts.push(
+      "## Datos de proyectos evaluados (recopilados por herramientas)\n\n" +
+        bulkSnippets.join("\n\n---\n\n")
+    );
+    emitContextEvent(options, {
+      type: "context_section",
+      section: "Proyectos masivos",
+      detail: `${bulkSnippets.length} fragmento(s) de proyectos evaluados`,
+    });
+  }
   const projectElementsTable =
     artifactProject.length > 0
       ? artifactProject
@@ -694,6 +714,11 @@ REGLA para preguntas sobre rúbrica o criterios: Responde únicamente que no hay
     separator.length * Math.max(0, parts.length - 1);
   const truncationNotice = "\n\n[Documentación de referencia truncada por límite de longitud.]";
   if (knowledgePart && otherLen + knowledgePart.length + truncationNotice.length > maxSystemChars) {
+    if (options?.strictEvaluate) {
+      throw new Error(
+        `El contexto de evaluación supera maxSystemChars (${maxSystemChars.toLocaleString("es")}): la sección Knowledge no cabe completa. Aumente «System max chars» en RAG de evaluación.`
+      );
+    }
     const maxKnowledgeLen = maxSystemChars - otherLen - truncationNotice.length;
     if (maxKnowledgeLen > 0) {
       const idx = parts.indexOf(knowledgePart);
@@ -704,6 +729,11 @@ REGLA para preguntas sobre rúbrica o criterios: Responde únicamente que no hay
   let fullContext = parts.join(separator);
   const truncationSuffix = "\n\n[Contexto truncado por límite de longitud.]";
   if (fullContext.length > maxSystemChars) {
+    if (options?.strictEvaluate) {
+      throw new Error(
+        `El contexto de evaluación (${fullContext.length.toLocaleString("es")} caracteres) supera maxSystemChars (${maxSystemChars.toLocaleString("es")}). Aumente «System max chars» en RAG de evaluación o reduzca rúbrica/elementos.`
+      );
+    }
     fullContext = fullContext.slice(0, maxSystemChars - truncationSuffix.length) + truncationSuffix;
     emitContextEvent(options, {
       type: "step",
@@ -712,10 +742,15 @@ REGLA para preguntas sobre rúbrica o criterios: Responde únicamente que no hay
     });
   }
 
+  const supplemental = options?.supplementalContextChars ?? 0;
+  const contextMessage =
+    supplemental > 0
+      ? `Contexto listo (${fullContext.length.toLocaleString("es")} caracteres de fuentes + ${supplemental.toLocaleString("es")} de evaluación masiva = ${(fullContext.length + supplemental).toLocaleString("es")} para el system prompt).`
+      : `Contexto listo (${fullContext.length.toLocaleString("es")} caracteres para el system prompt).`;
   emitContextEvent(options, {
     type: "step",
     phase: "context",
-    message: `Contexto listo (${fullContext.length.toLocaleString("es")} caracteres para el system prompt).`,
+    message: contextMessage,
   });
 
   return fullContext;

@@ -1,9 +1,10 @@
 import path from "path";
 import fs from "fs";
 
-import { getConfig } from "@/lib/db";
+import { getConfig, getEvaluationTypeById } from "@/lib/db";
 import { extractTextFromFile } from "@/lib/document-parser";
 import { extractTextWithVision } from "@/lib/extract-with-vision";
+import type { ElementExtractStrategy } from "@/lib/evaluation-type-settings";
 import type { ElementDef } from "@/lib/excel-heuristics";
 import { ingestProjectFiles } from "@/lib/project-ingest";
 import { extractElementHybrid } from "@/lib/project-extract-hybrid";
@@ -18,6 +19,7 @@ import { loadProjectStructuredIndex } from "@/lib/project-structured-index";
 import { projectIndexMatches } from "@/lib/project-vector-store";
 import { markIncompleteRows } from "@/lib/project-extract-validate";
 import type { ProjectStructuredData } from "@/lib/build-context";
+import { setExtractRunContext } from "@/lib/extract-run-context";
 
 export type ElementRow = {
   section: string;
@@ -46,11 +48,17 @@ function parseConfigElements(raw: unknown): ElementDef[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .filter((e): e is ElementDef => typeof e === "object" && e != null && "title" in e && "description" in e)
-    .map((e) => ({
-      title: String(e.title),
-      description: String(e.description ?? ""),
-      section: typeof e.section === "string" ? e.section : "General",
-    }));
+    .map((e) => {
+      const def: ElementDef = {
+        title: String(e.title),
+        description: String(e.description ?? ""),
+        section: typeof e.section === "string" ? e.section : "General",
+      };
+      if (e.extractStrategy && typeof e.extractStrategy === "object") {
+        def.extractStrategy = e.extractStrategy as ElementExtractStrategy;
+      }
+      return def;
+    });
 }
 
 export async function loadConfigElements(evaluationTypeId: number | null): Promise<ElementDef[]> {
@@ -107,10 +115,13 @@ export async function* runExtractPipeline(
   }
 
   const configElements = await loadConfigElements(evaluationTypeId);
+  const evaluationType =
+    evaluationTypeId != null ? await getEvaluationTypeById(evaluationTypeId) : null;
   const extractConfig =
     evaluationTypeId != null
       ? (await getEvaluationTypeSettings(evaluationTypeId)).extract
       : undefined;
+  const evaluationTypeName = evaluationType?.name ?? null;
   const elementTimeoutMs = extractConfig?.elementTimeoutMs ?? ELEMENT_TIMEOUT_MS;
 
   const canSkipIndex = skipReindex !== false && projectIndexMatches(sessionId, projectFilePaths);
@@ -119,7 +130,11 @@ export async function* runExtractPipeline(
   } else {
     yield { type: "step", message: "Indexando documentos del proyecto (estructurado + RAG)…" };
     try {
-      const { chunkCount, structuredFileCount } = await ingestProjectFiles(sessionId, projectFilePaths);
+      const { chunkCount, structuredFileCount } = await ingestProjectFiles(
+        sessionId,
+        projectFilePaths,
+        extractConfig
+      );
       yield {
         type: "step",
         message:
@@ -144,7 +159,8 @@ export async function* runExtractPipeline(
       let text = "";
       try {
         if (LIBRARY_EXTS.includes(ext)) text = await extractTextFromFile(filePath);
-        else if (VISION_EXTS.includes(ext)) text = await extractTextWithVision(filePath);
+        else if (VISION_EXTS.includes(ext))
+          text = await extractTextWithVision(filePath, { prompt: extractConfig?.vision.indexPrompt });
       } catch {
         /* skip */
       }
@@ -159,6 +175,8 @@ export async function* runExtractPipeline(
 
   yield { type: "step", message: "Extracción LLM por elemento (búsqueda integral en el proyecto)…" };
 
+  setExtractRunContext(extractConfig);
+  try {
   let elementsTable: ElementRow[] = [];
 
   for (const element of configElements) {
@@ -167,6 +185,7 @@ export async function* runExtractPipeline(
     const { content, method } = await extractElementHybrid(sessionId, element, {
       timeoutMs: elementTimeoutMs,
       extractConfig,
+      evaluationTypeName,
     });
 
     elementsTable.push({
@@ -178,7 +197,7 @@ export async function* runExtractPipeline(
     yield { type: "element", name: element.title, method };
   }
 
-  const duplicateGroups = findDuplicateContentGroups(elementsTable);
+  const duplicateGroups = findDuplicateContentGroups(elementsTable, extractConfig?.duplicateGuard);
   if (duplicateGroups.length > 0) {
     yield {
       type: "step",
@@ -193,7 +212,7 @@ export async function* runExtractPipeline(
         if (!def) continue;
 
         const others = group.titles.filter((t) => t !== title);
-        const hint = buildDuplicateRetryHint(title, others, group.sharedContent);
+        const hint = buildDuplicateRetryHint(title, others, group.sharedContent, extractConfig?.duplicateGuard);
 
         yield { type: "step", message: `Revisando duplicado: ${title}…` };
 
@@ -202,6 +221,7 @@ export async function* runExtractPipeline(
           extraHints: hint,
           skipDeterministic: true,
           extractConfig,
+          evaluationTypeName,
         });
 
         const row = byElement.get(title);
@@ -232,13 +252,15 @@ export async function* runExtractPipeline(
       const hint = buildDuplicateRetryHint(
         innovadorDef.title,
         [continuityRow.element],
-        continuityRow.content
+        continuityRow.content,
+        extractConfig?.duplicateGuard
       );
       const { content, method } = await extractElementHybrid(sessionId, innovadorDef, {
         timeoutMs: elementTimeoutMs,
         extraHints: hint,
         skipDeterministic: false,
         extractConfig,
+        evaluationTypeName,
       });
       innovadorRow.content = content;
       yield { type: "element", name: innovadorDef.title, method: `${method}:continuity_fix` };
@@ -258,6 +280,9 @@ export async function* runExtractPipeline(
     structuredData: structuredData ?? genericJson,
     elementsTable: validatedTable,
   };
+  } finally {
+    setExtractRunContext(undefined);
+  }
 }
 
 /** Reintento interactivo de un solo elemento (desde chat o API). */
@@ -279,14 +304,16 @@ export async function retryExtractElement(input: {
     input.skipReindex !== true && !projectIndexMatches(input.sessionId, input.projectFilePaths);
 
   if (needsIndex) {
-    await ingestProjectFiles(input.sessionId, input.projectFilePaths);
+    await ingestProjectFiles(input.sessionId, input.projectFilePaths, extractConfig);
   }
 
   const extractConfig = (await getEvaluationTypeSettings(input.evaluationTypeId)).extract;
+  const evaluationType = await getEvaluationTypeById(input.evaluationTypeId);
 
   const { content, method } = await extractElementHybrid(input.sessionId, element, {
     timeoutMs: extractConfig.elementTimeoutMs,
     extractConfig,
+    evaluationTypeName: evaluationType?.name ?? null,
   });
 
   const validated = markIncompleteRows(

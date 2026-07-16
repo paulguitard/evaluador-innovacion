@@ -1,6 +1,7 @@
 import { parseReportFormatLimits } from "@/lib/report-format-limits";
 import type { RubricConfig, RubricConfigNiveles, RubricConfigPonderaciones } from "@/lib/rubric-config";
 import { hasRubricVariables } from "@/lib/rubric-niveles";
+import { EVALUATION_REPORT_LANGUAGE_BULLET } from "@/lib/system-prompts-catalog";
 
 export type ReportSectionKind =
   | "custom"
@@ -67,7 +68,7 @@ export function variableEvalId(variableId: string): string {
 
 export const ASSIGNED_LEVEL_ID = "assigned_level";
 
-const DEFAULT_DIM_OVERVIEW = { minChars: 400, maxChars: 500 };
+const DEFAULT_DIM_OVERVIEW = { minChars: 350, maxChars: 700 };
 const DEFAULT_SUB_EVAL = { minChars: 1200, maxChars: 1500 };
 const DEFAULT_ASSIGNED_LEVEL = { minChars: 1500, maxChars: 2000 };
 
@@ -644,15 +645,6 @@ export function getDimensionOverviewLimits(
     : { ...DEFAULT_DIM_OVERVIEW };
 }
 
-/** @deprecated Use getDimensionOverviewLimits */
-export function getDimensionOverviewMaxChars(
-  config: ReportFormatConfig,
-  rubric: RubricConfig,
-  dimensionId: string
-): number {
-  return getDimensionOverviewLimits(config, rubric, dimensionId).maxChars;
-}
-
 export function parseReportFormatFromLegacyText(
   text: string,
   rubric?: RubricConfig
@@ -767,6 +759,7 @@ Tu tarea es redactar el informe final siguiendo EXACTAMENTE estas secciones (en 
 ${sectionLines.join("\n\n")}
 
 REGLAS:
+- ${EVALUATION_REPORT_LANGUAGE_BULLET}
 - Genera TODAS las secciones numeradas; no omitas ninguna ni cambies el orden.
 - Cada sección debe respetar su longitud mínima y máxima de caracteres.
 - Usa encabezados markdown (## para secciones principales, ### para subdimensiones) con los títulos indicados.

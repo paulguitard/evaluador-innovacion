@@ -7,9 +7,14 @@ import { extractTextWithVision } from "@/lib/extract-with-vision";
 import { extractExcelToStructuredJson } from "@/lib/excel-structured-extract";
 import { saveProjectChunks } from "@/lib/project-vector-store";
 import type { StoredChunk } from "@/lib/vector-store";
+import type { ExtractProjectIndexConfig, ExtractVisionConfig } from "@/lib/evaluation-type-settings";
+import {
+  defaultExtractProjectIndexConfig,
+  defaultExtractVisionConfig,
+} from "@/lib/eval-types/extract-config-defaults";
 
-const CHUNK_SIZE = 900;
-const OVERLAP = 120;
+const DEFAULT_INDEX = defaultExtractProjectIndexConfig();
+const DEFAULT_VISION = defaultExtractVisionConfig();
 const VISION_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 
 export type IndexProjectResult = { chunkCount: number };
@@ -24,7 +29,8 @@ function excelSheetToText(
 }
 
 async function extractFileSegments(
-  filePath: string
+  filePath: string,
+  visionPrompt?: string
 ): Promise<Array<{ docName: string; text: string; page?: number }>> {
   if (!fs.existsSync(filePath)) return [];
   const docName = path.basename(filePath);
@@ -52,7 +58,7 @@ async function extractFileSegments(
   }
 
   if (VISION_EXTS.has(ext)) {
-    const text = await extractTextWithVision(filePath);
+    const text = await extractTextWithVision(filePath, { prompt: visionPrompt });
     if (!text || text.startsWith("[")) return [];
     return [{ docName, text }];
   }
@@ -67,8 +73,14 @@ async function extractFileSegments(
  */
 export async function indexProjectFiles(
   sessionId: string,
-  filePaths: string[]
+  filePaths: string[],
+  options?: {
+    projectIndex?: ExtractProjectIndexConfig;
+    vision?: ExtractVisionConfig;
+  }
 ): Promise<IndexProjectResult> {
+  const indexCfg = options?.projectIndex ?? DEFAULT_INDEX;
+  const visionPrompt = options?.vision?.indexPrompt?.trim() || DEFAULT_VISION.indexPrompt;
   const validPaths = filePaths.filter((p) => p && fs.existsSync(p));
   if (validPaths.length === 0) {
     saveProjectChunks(sessionId, [], {
@@ -80,7 +92,7 @@ export async function indexProjectFiles(
 
   const segments: Array<{ docName: string; text: string; page?: number }> = [];
   for (const filePath of validPaths) {
-    const segs = await extractFileSegments(filePath);
+    const segs = await extractFileSegments(filePath, visionPrompt);
     segments.push(...segs);
   }
 
@@ -95,8 +107,8 @@ export async function indexProjectFiles(
   const allChunks: ReturnType<typeof chunkText> = [];
   for (const { docName, text, page } of segments) {
     const chunks = chunkText(text, docName, {
-      chunkSizeChars: CHUNK_SIZE,
-      overlapChars: OVERLAP,
+      chunkSizeChars: indexCfg.chunkSizeChars,
+      overlapChars: indexCfg.overlapChars,
       page,
     });
     allChunks.push(...chunks);

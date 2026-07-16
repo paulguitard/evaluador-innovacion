@@ -1,6 +1,7 @@
 import type { BulkProjectRow } from "@/hooks/useBulkEvaluation";
 import { formatIndicatorScore, type RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
 import { generateEvaluationPdfBlob, sanitizeFileName } from "@/lib/evaluation-pdf";
+import { looksLikeCompleteIgipReport } from "@/lib/report-completeness";
 
 function downloadBlob(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob);
@@ -65,8 +66,14 @@ export async function exportBulkResultsZip(
   const JSZip = (await import("jszip")).default;
   const zip = new JSZip();
 
-  const withReports = rows.filter((r) => r.reportContent.trim().length > 0);
-  if (withReports.length === 0) return;
+  const withReports = rows.filter(
+    (r) => r.reportContent.trim().length > 0 && looksLikeCompleteIgipReport(r.reportContent)
+  );
+  if (withReports.length === 0) {
+    throw new Error(
+      "No hay informes completos para exportar. Espere a que termine el formateo o reintente las filas con error."
+    );
+  }
 
   for (const row of withReports) {
     const title = `${reportTitlePrefix}: ${row.projectName}`;

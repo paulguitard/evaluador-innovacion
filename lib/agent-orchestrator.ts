@@ -15,6 +15,13 @@ import {
   type AgentToolContext,
 } from "@/lib/agent-tools";
 
+import type { BulkChatProject } from "@/lib/bulk-chat-types";
+import {
+  CHAT_TOOL_LOOP_SYSTEM_PROMPT,
+  CHAT_RESPONSE_BASE_INSTRUCTION,
+  CHAT_RESPONSE_LANGUAGE_PREFIX,
+} from "@/lib/system-prompts-catalog";
+
 export type ChatAgentInput = {
   evaluationTypeId: number;
   message: string;
@@ -24,6 +31,8 @@ export type ChatAgentInput = {
   projectStructuredData?: ProjectStructuredData;
   /** Resultados de evaluación masiva (informes y notas) para preguntas post-evaluación. */
   bulkEvaluationContext?: string;
+  /** Proyectos evaluados en masa (datos estructurados para tools). */
+  bulkProjects?: BulkChatProject[];
   history: { role: "user" | "assistant"; content: string }[];
   /** Fragmentos RAG recuperados en el cliente (evita descarga Blob en servidor). */
   precomputedKnowledgeChunks?: import("@/lib/chunk-types").RetrievedChunk[];
@@ -32,10 +41,6 @@ export type ChatAgentInput = {
 
 const MAX_ITER_B = 4;
 const MAX_ITER_C = 8;
-
-const TOOL_LOOP_SYSTEM = `Eres un agente recopilador de contexto para un evaluador de proyectos de innovación.
-Llama herramientas para reunir información. Cuando tengas suficiente, responde con un mensaje que empiece por LISTO: y un breve resumen.
-No respondas a la pregunta del usuario todavía.`;
 
 function buildResponseRules(
   plan: ContextPlan,
@@ -67,6 +72,7 @@ async function* runToolLoop(
     projectFilePaths: input.projectFilePaths,
     projectElementsTable: input.projectElementsTable,
     projectStructuredData: input.projectStructuredData,
+    bulkProjects: input.bulkProjects,
   };
 
   yield {
@@ -76,7 +82,7 @@ async function* runToolLoop(
   };
 
   const messages: Parameters<typeof chatCompletionWithTools>[0] = [
-    { role: "system", content: TOOL_LOOP_SYSTEM },
+    { role: "system", content: CHAT_TOOL_LOOP_SYSTEM_PROMPT },
     {
       role: "user",
       content: `Pregunta: ${input.message}\n\nPlan:\n${planSourcesSummary(plan)}\n\nHerramientas sugeridas: ${plan.toolsHint.join(", ") || "las necesarias"}`,
@@ -161,11 +167,12 @@ async function* runToolLoop(
 export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatStreamEvent> {
   const config = await getConfig(input.evaluationTypeId);
   const hasRubric = !!((config?.rubric_prompt ?? "").trim());
-  const hasBulkEvalData = !!(input.bulkEvaluationContext?.trim());
-  const hasProjectData = !!(
+  const hasBulkEvalData = !!(
+    input.bulkEvaluationContext?.trim() || (input.bulkProjects?.length ?? 0) > 0
+  );
+  const hasDirectProjectData = !!(
     input.projectElementsTable?.length ||
-    input.projectStructuredData?.files?.length ||
-    hasBulkEvalData
+    input.projectStructuredData?.files?.length
   );
   const hasKnowledge =
     (await isKnowledgeConfigured(input.evaluationTypeId)) &&
@@ -179,7 +186,8 @@ export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatS
 
   let plan = await routeContextPlan({
     message: input.message,
-    hasProjectData,
+    hasProjectData: hasDirectProjectData,
+    hasBulkEvaluationData: hasBulkEvalData,
     hasRubric,
     hasKnowledge,
   });
@@ -258,6 +266,9 @@ export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatS
       !plan.comparisonMode);
 
   const contextEvents: ChatStreamEvent[] = [];
+  const bulkBlock = input.bulkEvaluationContext?.trim()
+    ? `${input.bulkEvaluationContext.trim()}\n\n---\n\n`
+    : "";
   const systemContent = await buildSystemContext(input.evaluationTypeId, input.projectFilePaths, {
     projectElementsTable: input.projectElementsTable?.length
       ? input.projectElementsTable
@@ -272,6 +283,7 @@ export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatS
     chapterNumbers: plan.chapterNumbers,
     contextPlan: plan,
     agentArtifacts: artifacts,
+    supplementalContextChars: bulkBlock.length,
     onStreamEvent: (event) => contextEvents.push(event),
   });
 
@@ -281,14 +293,9 @@ export async function* runChatAgent(input: ChatAgentInput): AsyncGenerator<ChatS
     hasRubric &&
     (includesSource(plan, "rubric") || !!artifacts.rubricText?.trim());
 
-  const languageInstruction =
-    "Responde siempre en español. Todas tus respuestas deben estar escritas íntegramente en español.\n\n";
-  const baseInstruction =
-    "Eres un asistente experto en evaluación de proyectos. Responde con claridad y basándote solo en el contexto proporcionado.\n\nREGLA OBLIGATORIA para objetivos: Si preguntan por el objetivo general o los objetivos específicos del proyecto, cita ÚNICAMENTE el texto de la sección del proyecto. No parafrasees.\n\nNo uses nunca las etiquetas <think> ni </think> en tus respuestas.";
+  const languageInstruction = CHAT_RESPONSE_LANGUAGE_PREFIX;
+  const baseInstruction = CHAT_RESPONSE_BASE_INSTRUCTION;
   const rulesBlock = buildResponseRules(plan, hasRubric, rubricInContext);
-  const bulkBlock = input.bulkEvaluationContext?.trim()
-    ? `${input.bulkEvaluationContext.trim()}\n\n---\n\n`
-    : "";
   const systemMessage =
     (rulesBlock ? `REGLAS DE RESPUESTA:\n${rulesBlock}\n\n---\n\n` : "") +
     languageInstruction +

@@ -2,6 +2,12 @@ export type ChatAgentConfig = {
   routerSystemPrompt: string;
   knowledgeResponseRules: string[];
   multiChapterResponseRules: string[];
+  /** Reglas para preguntas sobre evaluación masiva / comparación de proyectos. */
+  bulkResponseRules: string[];
+  /** Reglas para preguntas sobre configuración del tipo. */
+  configResponseRules: string[];
+  /** Reglas para datos de proyecto (extracts) cuando aplica. */
+  projectResponseRules: string[];
   contextHardRules: {
     knowledgeOnlyNoRubric: string;
     chapterComparisonNoRubric: string;
@@ -24,6 +30,9 @@ Fuentes disponibles (sources):
 Reglas:
 - Si preguntan por el manual, knowledge, Oslo, innovación teórica, definiciones → sources SOLO knowledge_rag (o knowledge_rag + project si comparan). excludeSources debe incluir rubric, report_format, config_summary salvo que también pregunten por ellos.
 - Si preguntan por el proyecto (objetivos, presupuesto, sedes…) → project (+ project_structured si hay Excel). excludeSources: rubric, knowledge_rag salvo que también lo pidan.
+- Si hay evaluación masiva completada y preguntan por comparar proyectos, notas o cómo mejorar/subir una puntuación → sources rubric (el bloque masivo ya incluye extracts, notas e informes). excludeSources: project, project_structured salvo que también lo pidan. toolsHint: list_bulk_projects, get_bulk_project, search_bulk_projects, get_rubric. agentLevel "B" o "C" si comparan varios proyectos o combinan fuentes.
+- Si preguntan cómo subir o mejorar una nota, pasar de un nivel a otro, o alcanzar una puntuación → DEBES incluir rubric en sources y tools bulk.
+- Si preguntan solo por el manual/knowledge sin mencionar proyectos → sources SOLO knowledge_rag aunque haya evaluación masiva completada.
 - Si preguntan por configuración, formato, elementos, rúbrica configurada → config sources. excludeSources: knowledge_rag, project.
 - Si preguntan por la rúbrica Y el manual/Oslo (evaluar la rúbrica según el manual) → sources knowledge_rag + rubric; NO excluir rubric; agentLevel C, useToolLoop true.
 - Si comparan manual Y proyecto O necesitan varias fuentes → complexity "moderate" o "complex", agentLevel "B" o "C", useToolLoop true.
@@ -35,7 +44,7 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):
 {
   "agentLevel": "A" | "B" | "C",
   "complexity": "simple" | "moderate" | "complex",
-  "intent": "knowledge" | "project" | "config" | "mixed",
+  "intent": "knowledge" | "project" | "config" | "mixed" | "bulk_eval",
   "intentLabel": "texto corto en español",
   "sources": ["..."],
   "excludeSources": ["..."],
@@ -44,7 +53,7 @@ Responde ÚNICAMENTE con JSON válido (sin markdown):
   "reasoning": "1-2 frases en español",
   "responseRules": ["regla 1", "regla 2"],
   "useToolLoop": false,
-  "toolsHint": ["search_knowledge", "get_project_elements"]
+  "toolsHint": ["search_knowledge", "list_bulk_projects", "get_rubric"]
 }`;
 
 export function defaultChatAgentConfig(): ChatAgentConfig {
@@ -59,6 +68,18 @@ export function defaultChatAgentConfig(): ChatAgentConfig {
       "Usa solo los fragmentos del Knowledge. PROHIBIDO usar la rúbrica de evaluación.",
       "Si un capítulo no tiene fragmentos en el contexto, indícalo sin inventar.",
     ],
+    bulkResponseRules: [
+      "Usa la sección de resultados de evaluación masiva como fuente principal de datos de proyectos.",
+      "Compara proyectos usando notas, extracts, resúmenes, informes y criterios de la rúbrica cuando aplique.",
+      "Para recomendaciones de mejora de nota, cita qué exige la rúbrica en el nivel objetivo y contrasta con la evidencia de cada proyecto.",
+    ],
+    configResponseRules: [
+      "Responde solo desde las secciones de configuración indicadas.",
+    ],
+    projectResponseRules: [
+      "Prioriza los elementos identificados del proyecto.",
+      "Para objetivos, cita el texto literal sin parafrasear.",
+    ],
     contextHardRules: {
       knowledgeOnlyNoRubric:
         "PROHIBIDO usar la rúbrica de evaluación ni criterios de evaluación del proyecto.",
@@ -70,6 +91,15 @@ export function defaultChatAgentConfig(): ChatAgentConfig {
   };
 }
 
+function stringArray(
+  raw: unknown,
+  fallback: string[]
+): string[] {
+  return Array.isArray(raw)
+    ? raw.filter((r): r is string => typeof r === "string")
+    : fallback;
+}
+
 export function mergeChatAgentConfig(raw: Partial<ChatAgentConfig> | null | undefined): ChatAgentConfig {
   const base = defaultChatAgentConfig();
   if (!raw || typeof raw !== "object") return base;
@@ -78,12 +108,14 @@ export function mergeChatAgentConfig(raw: Partial<ChatAgentConfig> | null | unde
       typeof raw.routerSystemPrompt === "string" && raw.routerSystemPrompt.trim()
         ? raw.routerSystemPrompt
         : base.routerSystemPrompt,
-    knowledgeResponseRules: Array.isArray(raw.knowledgeResponseRules)
-      ? raw.knowledgeResponseRules.filter((r): r is string => typeof r === "string")
-      : base.knowledgeResponseRules,
-    multiChapterResponseRules: Array.isArray(raw.multiChapterResponseRules)
-      ? raw.multiChapterResponseRules.filter((r): r is string => typeof r === "string")
-      : base.multiChapterResponseRules,
+    knowledgeResponseRules: stringArray(raw.knowledgeResponseRules, base.knowledgeResponseRules),
+    multiChapterResponseRules: stringArray(
+      raw.multiChapterResponseRules,
+      base.multiChapterResponseRules
+    ),
+    bulkResponseRules: stringArray(raw.bulkResponseRules, base.bulkResponseRules),
+    configResponseRules: stringArray(raw.configResponseRules, base.configResponseRules),
+    projectResponseRules: stringArray(raw.projectResponseRules, base.projectResponseRules),
     contextHardRules: {
       knowledgeOnlyNoRubric:
         typeof raw.contextHardRules?.knowledgeOnlyNoRubric === "string"

@@ -6,42 +6,18 @@ import { useState, useRef, useEffect } from "react";
 
 import ThemeSwitcher from "@/components/ThemeSwitcher";
 
-import type { EvaluationMode } from "@/lib/evaluation-mode";
-
-
-
 type EvaluationType = { id: number; name: string };
 
-
-
 export default function Header({
-
   types,
-
   activeId,
-
   onSelect,
-
   onOpenConfig,
-
-  evaluationMode,
-
-  onEvaluationModeChange,
-
 }: {
-
   types: EvaluationType[];
-
   activeId: number | null;
-
   onSelect: (id: number) => void;
-
   onOpenConfig: () => void;
-
-  evaluationMode: EvaluationMode;
-
-  onEvaluationModeChange: (mode: EvaluationMode) => void;
-
 }) {
 
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -160,36 +136,8 @@ export default function Header({
 
       </div>
 
-      <div className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center rounded-lg border border-gray-200 bg-white p-0.5 dark:border-gray-600 dark:bg-[#1e1e1e]">
-
-        {(["individual", "bulk"] as const).map((mode) => (
-
-          <button
-
-            key={mode}
-
-            type="button"
-
-            onClick={() => onEvaluationModeChange(mode)}
-
-            className={`rounded-md px-4 py-1 text-xs font-medium transition-colors focus:outline-none focus:ring-1 focus:ring-gray-400 ${
-
-              evaluationMode === mode
-
-                ? "bg-gray-800 text-white dark:bg-gray-200 dark:text-gray-900"
-
-                : "text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200"
-
-            }`}
-
-          >
-
-            {mode === "individual" ? "Individual" : "Masivo"}
-
-          </button>
-
-        ))}
-
+      <div className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center rounded-lg border border-gray-200 bg-white px-4 py-1 dark:border-gray-600 dark:bg-[#1e1e1e]">
+        <span className="text-xs font-medium text-gray-700 dark:text-gray-300">Masivo</span>
       </div>
 
       <div className="flex shrink-0 items-center gap-2">

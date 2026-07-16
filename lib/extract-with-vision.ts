@@ -1,17 +1,16 @@
 import path from "path";
 import fs from "fs";
 import { chatCompletionVision } from "@/lib/openrouter";
+import { defaultExtractVisionConfig } from "@/lib/eval-types/extract-config-defaults";
 
-const EXTRACT_PROMPT = `Extrae todo el texto visible del documento en la imagen. Preséntalo ordenado y estructurado con secciones claras, por ejemplo:
-- Nombre del proyecto
-- Objetivo general
-- Objetivos específicos (numerados 1, 2, 3...)
-- Otros datos relevantes (beneficiarios, equipo, fechas, etc.)
-
-No inventes contenido. Respeta el orden y la numeración del documento original. Responde solo con el texto extraído, sin introducciones ni comentarios.`;
+const DEFAULT_VISION_PROMPT = defaultExtractVisionConfig().indexPrompt;
 
 /** Image types we send directly to vision (no conversion). */
 const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp"]);
+
+const MSG_NO_IMAGES =
+  "[Extracción por IA visión solo disponible para imágenes (JPG, PNG, WebP). Para Excel o Word, exporte el documento a PDF o guarde como imagen y súbalo.]";
+const MSG_VISION_ERROR = "[Error al extraer con IA visión. Compruebe la conexión y la API key.]";
 
 /**
  * Convert a file to an array of image payloads (mime + base64) for vision API.
@@ -40,22 +39,19 @@ export async function fileToImageBuffers(
   return [];
 }
 
-const MSG_NO_IMAGES =
-  "[Extracción por IA visión solo disponible para imágenes (JPG, PNG, WebP). Para Excel o Word, exporte el documento a PDF o guarde como imagen y súbalo.]";
-const MSG_VISION_ERROR = "[Error al extraer con IA visión. Compruebe la conexión y la API key.]";
-
 /**
  * Extract text from a document using vision AI only. No fallback to library extraction.
  */
 export async function extractTextWithVision(
   filePath: string,
-  options?: { maxPages?: number }
+  options?: { maxPages?: number; prompt?: string }
 ): Promise<string> {
   const images = await fileToImageBuffers(filePath, options);
   if (images.length === 0) {
     return MSG_NO_IMAGES;
   }
 
+  const prompt = options?.prompt?.trim() || DEFAULT_VISION_PROMPT;
   const parts: string[] = [];
   for (let i = 0; i < images.length; i++) {
     const { mime, base64 } = images[i];
@@ -65,7 +61,7 @@ export async function extractTextWithVision(
         {
           role: "user",
           content: [
-            { type: "text", text: EXTRACT_PROMPT },
+            { type: "text", text: prompt },
             { type: "image_url", image_url: { url } },
           ],
         },

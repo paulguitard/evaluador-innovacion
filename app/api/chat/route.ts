@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import type { ProjectStructuredData } from "@/lib/build-context";
+import type { BulkChatProject } from "@/lib/bulk-chat-types";
 import { runChatAgent } from "@/lib/agent-orchestrator";
 import type { ChatStreamEvent } from "@/lib/agent-events";
 import { formatProviderError } from "@/lib/openrouter";
@@ -50,6 +51,11 @@ export async function POST(request: Request) {
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content.slice(0, MAX_MESSAGE_CHARS) }));
     const bulkEvaluationContext =
       typeof body?.bulkEvaluationContext === "string" ? body.bulkEvaluationContext.trim() : "";
+    const bulkProjects = Array.isArray(body?.bulkProjects)
+      ? (body.bulkProjects as BulkChatProject[]).filter(
+          (p) => p && typeof p.id === "string" && typeof p.projectName === "string"
+        )
+      : undefined;
 
     if (!Number.isInteger(evaluationTypeId) || evaluationTypeId < 1) {
       return NextResponse.json({ error: "evaluationTypeId required" }, { status: 400 });
@@ -77,6 +83,7 @@ export async function POST(request: Request) {
             projectElementsTable,
             projectStructuredData,
             bulkEvaluationContext: bulkEvaluationContext || undefined,
+            bulkProjects,
             history,
             precomputedKnowledgeChunks,
             clientRagEnabled,

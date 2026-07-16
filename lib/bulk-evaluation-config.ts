@@ -8,7 +8,7 @@ export const BULK_EVALUATION_CONFIG_KEY = "bulk_evaluation_config";
 
 export function defaultBulkEvaluationConfig(): BulkEvaluationConfig {
   return {
-    parallelProjects: 3,
+    parallelProjects: 2,
     useClientKnowledgeIndex: true,
     preloadKnowledgeOnBulkStart: true,
   };

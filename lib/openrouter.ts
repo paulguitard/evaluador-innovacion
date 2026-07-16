@@ -20,6 +20,10 @@ export type OpenRouterCallOptions = {
   max_tokens?: number;
   model?: string;
   useCase?: LlmUseCase;
+  /** Deshabilita/minimiza tokens de reasoning en modelos que soportan `reasoning` param
+   *  (algunos providers de gpt-oss consumen todo el presupuesto en thinking invisible
+   *   sin emitir content). Usar en secciones donde solo interesa el output final. */
+  disableReasoning?: boolean;
 };
 
 function openRouterHeaders(apiKey: string): Record<string, string> {
@@ -118,16 +122,23 @@ export async function* streamChat(
   const res = await runWithRetries(
     useCase,
     async (model, apiKey) => {
+      const body: Record<string, unknown> = {
+        model,
+        messages,
+        stream: true,
+        max_tokens: maxTokens,
+        temperature,
+      };
+      // Fuerza a proveedores que soportan reasoning a NO gastar tokens en thinking.
+      // Sin esto, providers como Phala/Google-Vertex/Groq de gpt-oss consumen todo el
+      // presupuesto en reasoning invisible y devuelven content vacío.
+      if (options?.disableReasoning) {
+        body.reasoning = { effort: "low", exclude: true };
+      }
       const response = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
         method: "POST",
         headers: openRouterHeaders(apiKey),
-        body: JSON.stringify({
-          model,
-          messages,
-          stream: true,
-          max_tokens: maxTokens,
-          temperature,
-        }),
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
         const errBody = await response.text();

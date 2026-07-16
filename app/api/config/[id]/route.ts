@@ -136,6 +136,8 @@ export async function GET(
 
         rag_config: settings.rag,
 
+        rubric_config,
+
       },
 
       type.name

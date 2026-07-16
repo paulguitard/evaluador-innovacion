@@ -104,6 +104,9 @@ export function multiChapterComparisonPlan(
     ...agentConfig.multiChapterResponseRules,
     `Incluye un apartado por cada capítulo mencionado (${chList}) y un apartado final «Comparación» que relacione ambos según la pregunta.`,
   ];
+  if (agentConfig.contextHardRules.chapterComparisonNoRubric.trim()) {
+    rules.push(agentConfig.contextHardRules.chapterComparisonNoRubric.trim());
+  }
   return {
     agentLevel: "C",
     complexity: "complex",
@@ -128,6 +131,13 @@ export function knowledgeOnlyPlan(
   chapter?: number,
   agentConfig: ChatAgentConfig = defaultChatAgentConfig()
 ): ContextPlan {
+  const rules = [...agentConfig.knowledgeResponseRules];
+  if (agentConfig.contextHardRules.knowledgeOnlyNoRubric.trim()) {
+    const hard = agentConfig.contextHardRules.knowledgeOnlyNoRubric.trim();
+    if (!rules.some((r) => r.includes(hard.slice(0, 40)))) {
+      rules.push(hard);
+    }
+  }
   return {
     agentLevel: "A",
     complexity: "simple",
@@ -140,13 +150,43 @@ export function knowledgeOnlyPlan(
     pageNumber: page,
     chapterNumber: chapter,
     reasoning: "Pregunta sobre el manual de referencia; excluir rúbrica y configuración.",
-    responseRules: [...agentConfig.knowledgeResponseRules],
+    responseRules: rules,
     useToolLoop: false,
     toolsHint: [],
   };
 }
 
-export function projectOnlyPlan(ragQuery: string): ContextPlan {
+export function bulkEvaluationPlan(
+  ragQuery: string,
+  agentConfig: ChatAgentConfig = defaultChatAgentConfig()
+): ContextPlan {
+  return {
+    agentLevel: "B",
+    complexity: "moderate",
+    intent: "bulk_eval",
+    intentLabel: "Evaluación masiva",
+    sources: ["rubric"],
+    excludeSources: [
+      "project",
+      "project_structured",
+      "knowledge_rag",
+      "report_format",
+      "config_summary",
+    ],
+    ragMode: "chat-project",
+    ragQuery,
+    reasoning:
+      "Pregunta sobre resultados de evaluación masiva; extracts, notas e informes vienen en el bloque bulk.",
+    responseRules: [...agentConfig.bulkResponseRules],
+    useToolLoop: true,
+    toolsHint: ["list_bulk_projects", "get_rubric"],
+  };
+}
+
+export function projectOnlyPlan(
+  ragQuery: string,
+  agentConfig: ChatAgentConfig = defaultChatAgentConfig()
+): ContextPlan {
   return {
     agentLevel: "A",
     complexity: "simple",
@@ -157,16 +197,15 @@ export function projectOnlyPlan(ragQuery: string): ContextPlan {
     ragMode: "chat-project",
     ragQuery,
     reasoning: "Pregunta sobre datos del proyecto.",
-    responseRules: [
-      "Prioriza los elementos identificados del proyecto.",
-      "Para objetivos, cita el texto literal sin parafrasear.",
-    ],
+    responseRules: [...agentConfig.projectResponseRules],
     useToolLoop: false,
     toolsHint: [],
   };
 }
 
-export function configOnlyPlan(): ContextPlan {
+export function configOnlyPlan(
+  agentConfig: ChatAgentConfig = defaultChatAgentConfig()
+): ContextPlan {
   return {
     agentLevel: "A",
     complexity: "simple",
@@ -177,7 +216,7 @@ export function configOnlyPlan(): ContextPlan {
     ragMode: "chat-config",
     ragQuery: "",
     reasoning: "Pregunta sobre configuración, formato o rúbrica.",
-    responseRules: ["Responde solo desde las secciones de configuración indicadas."],
+    responseRules: [...agentConfig.configResponseRules],
     useToolLoop: false,
     toolsHint: [],
   };

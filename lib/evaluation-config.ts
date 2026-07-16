@@ -1,13 +1,18 @@
 import { CONTEXT_LIMITS } from "@/lib/rag-limits";
+import { isImet } from "@/lib/eval-types/constants";
+import {
+  DEFAULT_ASSIGN_LEVEL_USER_PROMPT,
+  DEFAULT_EVAL_SYSTEM_FALLBACK,
+  DEFAULT_GLOBAL_LEVEL_USER_PROMPT,
+  DEFAULT_SUBDIMENSION_USER_PROMPT,
+  DEFAULT_VARIABLE_EVAL_USER_PROMPT,
+} from "@/lib/eval-types/prompt-defaults";
 import type { PipelineConfig } from "@/lib/evaluation-type-settings";
 import type { RagConfig } from "@/lib/evaluation-type-settings";
 import type { ReportFormatConfig } from "@/lib/report-format-config";
+import type { RubricConfig } from "@/lib/rubric-config";
 
-/** @deprecated Legacy — el resumen macro vive solo en §6 (report_format_config). */
-export const DEFAULT_EVAL_DIMENSION_OVERVIEW_PHASE = "";
-
-export const DEFAULT_EVAL_SUBDIMENSION_PHASE =
-  "Evaluación técnica y rigurosa del criterio: análisis detallado contrastando proyecto y rúbrica con el Knowledge; justificación fundamentada; sugerencias de mejora concretas; asignación de nota según escala.";
+export const DEFAULT_EVAL_SUBDIMENSION_PHASE = "";
 
 export const DEFAULT_EVAL_ASSIGNED_LEVEL_PHASE =
   "Asignación de nivel global con análisis de evidencia del proyecto y justificación técnica fundamentada en el Knowledge y la escala de niveles.";
@@ -15,13 +20,11 @@ export const DEFAULT_EVAL_ASSIGNED_LEVEL_PHASE =
 export type CharLimits = { minChars: number; maxChars: number };
 
 export type EvaluationPhaseInstructions = {
-  dimensionOverview: string;
   subdimensionEval: string;
   assignedLevel: string;
 };
 
 export type EvaluationOutputLimits = {
-  dimensionOverview: CharLimits;
   subdimensionEval: CharLimits;
   assignedLevel: CharLimits;
 };
@@ -35,6 +38,18 @@ export type EvaluationRagMode = {
 export type EvaluationPromptOverrides = {
   scoreJsonSystem?: string;
   formatInstructions?: string;
+  /** Plantilla user evaluación subdimensión (IGIP). Placeholders {{dimension}}, {{subdimension}}, etc. */
+  subdimensionUser?: string;
+  /** System fallback para pases RAG+LLM de evaluación. */
+  subdimensionSystem?: string;
+  /** Plantilla user evaluación por variable (IMET). */
+  variableEval?: string;
+  /** Plantilla user asignación de nivel global. */
+  assignLevel?: string;
+  /** Plantilla user nivel global desde variables. */
+  globalLevel?: string;
+  /** Override system del formateo monolítico de informe. */
+  formatSystem?: string;
 };
 
 export type EvaluationConfig = {
@@ -57,7 +72,6 @@ export type EvaluationConfig = {
   prompts: EvaluationPromptOverrides;
 };
 
-const DEFAULT_DIM_OVERVIEW: CharLimits = { minChars: 400, maxChars: 500 };
 const DEFAULT_SUB_EVAL: CharLimits = { minChars: 1200, maxChars: 1500 };
 const DEFAULT_ASSIGNED_LEVEL: CharLimits = { minChars: 1500, maxChars: 2000 };
 
@@ -69,6 +83,38 @@ function clampLimits(minChars: number, maxChars: number): CharLimits {
   const max = Math.max(1, Math.round(maxChars));
   const min = Math.min(max, Math.max(1, Math.round(minChars)));
   return { minChars: min, maxChars: max };
+}
+
+function resolvePromptOverride(raw: string | undefined, base: string | undefined): string {
+  const custom = typeof raw === "string" ? raw.trim() : "";
+  return custom || base?.trim() || "";
+}
+
+export function defaultEvaluationConfigForType(typeName?: string | null): EvaluationConfig {
+  const label = typeName?.trim() || "IGIP";
+  const base = defaultEvaluationConfig(label);
+  if (isImet(typeName)) {
+    return {
+      ...base,
+      indicatorLabel: "IMET",
+      knowledgeReferenceLabel: "Documentación técnica",
+      prompts: {
+        variableEval: DEFAULT_VARIABLE_EVAL_USER_PROMPT,
+        assignLevel: DEFAULT_ASSIGN_LEVEL_USER_PROMPT,
+        globalLevel: DEFAULT_GLOBAL_LEVEL_USER_PROMPT,
+        subdimensionSystem: DEFAULT_EVAL_SYSTEM_FALLBACK,
+      },
+    };
+  }
+  return {
+    ...base,
+    indicatorLabel: "IGIP",
+    knowledgeReferenceLabel: "Documentación técnica",
+    prompts: {
+      subdimensionUser: DEFAULT_SUBDIMENSION_USER_PROMPT,
+      subdimensionSystem: DEFAULT_EVAL_SYSTEM_FALLBACK,
+    },
+  };
 }
 
 export function defaultEvaluationConfig(indicatorLabel = "IGIP"): EvaluationConfig {
@@ -88,12 +134,10 @@ export function defaultEvaluationConfig(indicatorLabel = "IGIP"): EvaluationConf
     knowledgeReferenceLabel: "Manual de referencia",
     projectElementsInRagQuery: 8,
     phaseInstructions: {
-      dimensionOverview: "",
-      subdimensionEval: DEFAULT_EVAL_SUBDIMENSION_PHASE,
+      subdimensionEval: "",
       assignedLevel: DEFAULT_EVAL_ASSIGNED_LEVEL_PHASE,
     },
     outputLimits: {
-      dimensionOverview: { ...DEFAULT_DIM_OVERVIEW },
       subdimensionEval: { ...DEFAULT_SUB_EVAL },
       assignedLevel: { ...DEFAULT_ASSIGNED_LEVEL },
     },
@@ -152,14 +196,15 @@ function mergeFromPipeline(
       ),
     },
     prompts: {
-      scoreJsonSystem:
-        typeof pipeline.prompts?.scoreJsonSystem === "string"
-          ? pipeline.prompts.scoreJsonSystem
-          : base.prompts.scoreJsonSystem ?? "",
-      formatInstructions:
-        typeof pipeline.prompts?.formatInstructions === "string"
-          ? pipeline.prompts.formatInstructions
-          : base.prompts.formatInstructions ?? "",
+      ...base.prompts,
+      scoreJsonSystem: resolvePromptOverride(
+        pipeline.prompts?.scoreJsonSystem,
+        base.prompts.scoreJsonSystem
+      ),
+      formatInstructions: resolvePromptOverride(
+        pipeline.prompts?.formatInstructions,
+        base.prompts.formatInstructions
+      ),
     },
   };
 }
@@ -173,21 +218,12 @@ function mergeFromReportFormat(
     ...base,
     phaseInstructions: {
       ...base.phaseInstructions,
-      subdimensionEval:
-        reportFormat.subdimensionEvalInstructions?.trim() ||
-        base.phaseInstructions.subdimensionEval,
       assignedLevel:
         reportFormat.assignedLevelInstructions?.trim() ||
         base.phaseInstructions.assignedLevel,
     },
     outputLimits: {
       ...base.outputLimits,
-      subdimensionEval: reportFormat.subdimensionEvalLimits
-        ? clampLimits(
-            reportFormat.subdimensionEvalLimits.minChars,
-            reportFormat.subdimensionEvalLimits.maxChars
-          )
-        : base.outputLimits.subdimensionEval,
       assignedLevel: reportFormat.assignedLevelLimits
         ? clampLimits(
             reportFormat.assignedLevelLimits.minChars,
@@ -263,22 +299,14 @@ function mergeRawEvaluationConfig(
       50
     ),
     phaseInstructions: {
-      dimensionOverview:
-        raw.phaseInstructions?.dimensionOverview?.trim() ||
-        base.phaseInstructions.dimensionOverview,
       subdimensionEval:
-        raw.phaseInstructions?.subdimensionEval?.trim() ||
-        base.phaseInstructions.subdimensionEval,
+        raw.phaseInstructions?.subdimensionEval !== undefined
+          ? raw.phaseInstructions.subdimensionEval.trim()
+          : base.phaseInstructions.subdimensionEval,
       assignedLevel:
         raw.phaseInstructions?.assignedLevel?.trim() || base.phaseInstructions.assignedLevel,
     },
     outputLimits: {
-      dimensionOverview: raw.outputLimits?.dimensionOverview
-        ? clampLimits(
-            raw.outputLimits.dimensionOverview.minChars,
-            raw.outputLimits.dimensionOverview.maxChars
-          )
-        : base.outputLimits.dimensionOverview,
       subdimensionEval: raw.outputLimits?.subdimensionEval
         ? clampLimits(
             raw.outputLimits.subdimensionEval.minChars,
@@ -307,14 +335,26 @@ function mergeRawEvaluationConfig(
           : base.ragEvaluate.maxSystemChars,
     },
     prompts: {
-      scoreJsonSystem:
-        typeof raw.prompts?.scoreJsonSystem === "string"
-          ? raw.prompts.scoreJsonSystem
-          : base.prompts.scoreJsonSystem ?? "",
-      formatInstructions:
-        typeof raw.prompts?.formatInstructions === "string"
-          ? raw.prompts.formatInstructions
-          : base.prompts.formatInstructions ?? "",
+      scoreJsonSystem: resolvePromptOverride(
+        raw.prompts?.scoreJsonSystem,
+        base.prompts.scoreJsonSystem
+      ),
+      formatInstructions: resolvePromptOverride(
+        raw.prompts?.formatInstructions,
+        base.prompts.formatInstructions
+      ),
+      subdimensionUser: resolvePromptOverride(
+        raw.prompts?.subdimensionUser,
+        base.prompts.subdimensionUser
+      ),
+      subdimensionSystem: resolvePromptOverride(
+        raw.prompts?.subdimensionSystem,
+        base.prompts.subdimensionSystem
+      ),
+      variableEval: resolvePromptOverride(raw.prompts?.variableEval, base.prompts.variableEval),
+      assignLevel: resolvePromptOverride(raw.prompts?.assignLevel, base.prompts.assignLevel),
+      globalLevel: resolvePromptOverride(raw.prompts?.globalLevel, base.prompts.globalLevel),
+      formatSystem: resolvePromptOverride(raw.prompts?.formatSystem, base.prompts.formatSystem),
     },
   };
 }
@@ -324,6 +364,7 @@ export type EvaluationConfigMergeSources = {
   pipeline_config?: unknown;
   report_format_config?: unknown;
   rag_config?: unknown;
+  rubric_config?: unknown;
 };
 
 /** Merge con prioridad: evaluation_config > pipeline/report/rag legacy. */
@@ -331,30 +372,23 @@ export function mergeEvaluationConfig(
   sources: EvaluationConfigMergeSources | null | undefined,
   typeName?: string
 ): EvaluationConfig {
-  const label = typeName?.trim() || "IGIP";
-  let base = defaultEvaluationConfig(label);
+  let base = defaultEvaluationConfigForType(typeName);
 
   const pipeline = sources?.pipeline_config as Partial<PipelineConfig> | undefined;
   const reportFormat = sources?.report_format_config as Partial<ReportFormatConfig> | undefined;
   const rag = sources?.rag_config as Partial<RagConfig> | undefined;
+  const rubric = sources?.rubric_config as Partial<RubricConfig> | undefined;
 
   base = mergeFromPipeline(base, pipeline);
   base = mergeFromReportFormat(base, reportFormat);
   base = mergeFromRag(base, rag);
 
   const raw = sources?.evaluation_config as Partial<EvaluationConfig> | undefined;
-  return mergeRawEvaluationConfig(raw, base);
+  const merged = mergeRawEvaluationConfig(raw, base);
+  return merged;
 }
 
-/** @deprecated Ya no sincroniza; límites e instrucciones de informe viven solo en report_format_config (§6). */
-export function applyEvaluationConfigToReportFormat(
-  reportFormat: ReportFormatConfig,
-  _evaluationConfig: EvaluationConfig
-): ReportFormatConfig {
-  return reportFormat;
-}
-
-/** Construye evaluation_config desde fuentes legacy (para migración). */
+/** Construye evaluation_config desde fuentes antiguas (pipeline/report/rag) al migrar datos. */
 export function buildEvaluationConfigFromLegacy(
   sources: Omit<EvaluationConfigMergeSources, "evaluation_config">,
   typeName?: string

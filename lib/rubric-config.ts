@@ -152,10 +152,10 @@ export function defaultRubricConfigNiveles(): RubricConfigNiveles {
   return { type: "niveles", levels, variables: [] };
 }
 
+import { rubricTypeFor } from "@/lib/eval-types/constants";
+
 function inferRubricTypeFromName(typeName?: string): RubricType {
-  const n = (typeName ?? "").trim().toUpperCase();
-  if (n.includes("TRL") || n.includes("NIVEL")) return "niveles";
-  return "ponderaciones";
+  return rubricTypeFor(typeName);
 }
 
 function mergePonderaciones(
@@ -254,17 +254,28 @@ export function mergeRubricConfig(
   raw: unknown,
   typeName?: string
 ): RubricConfig {
+  const hasTypeName = typeof typeName === "string" && typeName.trim().length > 0;
+  const forced = hasTypeName ? inferRubricTypeFromName(typeName) : null;
+
   if (!raw || typeof raw !== "object") {
-    return inferRubricTypeFromName(typeName) === "niveles"
-      ? defaultRubricConfigNiveles()
-      : defaultRubricConfigPonderaciones();
+    if (forced === "niveles") return defaultRubricConfigNiveles();
+    return defaultRubricConfigPonderaciones();
   }
   const o = raw as { type?: string };
+
+  if (forced === "niveles") {
+    if (o.type === "niveles") return mergeNiveles(raw as RubricConfigNiveles);
+    return defaultRubricConfigNiveles();
+  }
+  if (forced === "ponderaciones") {
+    if (o.type === "ponderaciones") return mergePonderaciones(raw as RubricConfigPonderaciones);
+    return defaultRubricConfigPonderaciones();
+  }
+
+  // Sin nombre de tipo: respetar el type del JSON (tests / legacy).
   if (o.type === "niveles") return mergeNiveles(raw as RubricConfigNiveles);
   if (o.type === "ponderaciones") return mergePonderaciones(raw as RubricConfigPonderaciones);
-  return inferRubricTypeFromName(typeName) === "niveles"
-    ? defaultRubricConfigNiveles()
-    : defaultRubricConfigPonderaciones();
+  return defaultRubricConfigPonderaciones();
 }
 
 export function totalWeightPercent(config: RubricConfigPonderaciones): number {

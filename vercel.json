@@ -3,6 +3,9 @@
     "app/api/evaluate/route.ts": {
       "maxDuration": 300
     },
+    "app/api/format-report/route.ts": {
+      "maxDuration": 300
+    },
     "app/api/project-extract/route.ts": {
       "maxDuration": 300
     },

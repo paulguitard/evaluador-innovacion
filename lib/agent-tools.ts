@@ -11,6 +11,13 @@ import { getContextLimits } from "@/lib/rag-limits";
 import { getEvaluationTypeSettings } from "@/lib/evaluation-type-settings-server";
 import type { ContextPlan } from "@/lib/context-plan";
 import type { ProjectStructuredData } from "@/lib/build-context";
+import type { BulkChatProject } from "@/lib/bulk-chat-types";
+import {
+  findBulkProject,
+  getBulkProjectDetail,
+  listBulkProjectsSummary,
+  searchBulkProjects,
+} from "@/lib/bulk-chat-tools";
 import { searchProjectForQuery } from "@/lib/project-extract-tools";
 
 export type AgentToolName =
@@ -19,7 +26,10 @@ export type AgentToolName =
   | "get_rubric"
   | "get_config"
   | "get_project_elements"
-  | "reextract_project_element";
+  | "reextract_project_element"
+  | "list_bulk_projects"
+  | "get_bulk_project"
+  | "search_bulk_projects";
 
 export type AgentArtifacts = {
   knowledgeChunks: RetrievedChunk[];
@@ -27,6 +37,7 @@ export type AgentArtifacts = {
   rubricText?: string;
   configSections: Record<string, string>;
   projectElements: { element: string; content: string }[];
+  bulkProjectSnippets: string[];
   toolLog: Array<{ tool: AgentToolName; summary: string }>;
 };
 
@@ -36,6 +47,7 @@ export function createEmptyArtifacts(): AgentArtifacts {
     projectSearchSnippets: [],
     configSections: {},
     projectElements: [],
+    bulkProjectSnippets: [],
     toolLog: [],
   };
 }
@@ -47,6 +59,7 @@ export type AgentToolContext = {
   projectFilePaths?: string[];
   projectElementsTable?: { element: string; content: string }[];
   projectStructuredData?: ProjectStructuredData;
+  bulkProjects?: BulkChatProject[];
 };
 
 export const AGENT_TOOL_DEFINITIONS = [
@@ -138,6 +151,48 @@ export const AGENT_TOOL_DEFINITIONS = [
           },
         },
         required: ["element"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_bulk_projects",
+      description:
+        "Lista los proyectos evaluados en masa con nombre, archivo, IGIP y notas por subdimensión.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "get_bulk_project",
+      description:
+        "Obtiene datos completos de un proyecto evaluado en masa: extracts, notas, resumen e informe.",
+      parameters: {
+        type: "object",
+        properties: {
+          project: {
+            type: "string",
+            description: "Nombre del proyecto, nombre de archivo o id",
+          },
+        },
+        required: ["project"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "search_bulk_projects",
+      description:
+        "Busca texto en extracts, resúmenes e informes de todos los proyectos evaluados en masa.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Texto a buscar" },
+        },
+        required: ["query"],
       },
     },
   },
@@ -312,6 +367,39 @@ export async function executeAgentTool(
       return { summary, ok: !!result.content.trim() };
     }
 
+    case "list_bulk_projects": {
+      const projects = ctx.bulkProjects ?? [];
+      const summary = listBulkProjectsSummary(projects);
+      artifacts.bulkProjectSnippets.push(summary);
+      artifacts.toolLog.push({ tool, summary: summary.slice(0, 300) });
+      return { summary, ok: projects.length > 0 };
+    }
+
+    case "get_bulk_project": {
+      const query = typeof args.project === "string" ? args.project.trim() : "";
+      const projects = ctx.bulkProjects ?? [];
+      if (!query) return { summary: "Se requiere el nombre o id del proyecto.", ok: false };
+      const project = findBulkProject(projects, query);
+      if (!project) {
+        return { summary: `No se encontró el proyecto "${query}".`, ok: false };
+      }
+      const detail = getBulkProjectDetail(project);
+      artifacts.bulkProjectSnippets.push(detail);
+      const summary = `Proyecto "${project.projectName}" (${detail.length} caracteres).`;
+      artifacts.toolLog.push({ tool, summary });
+      return { summary: detail, ok: true };
+    }
+
+    case "search_bulk_projects": {
+      const query = typeof args.query === "string" ? args.query.trim() : "";
+      const projects = ctx.bulkProjects ?? [];
+      if (!query) return { summary: "Se requiere una consulta de búsqueda.", ok: false };
+      const result = searchBulkProjects(projects, query);
+      artifacts.bulkProjectSnippets.push(result);
+      artifacts.toolLog.push({ tool, summary: result.slice(0, 300) });
+      return { summary: result, ok: !result.startsWith("Sin coincidencias") };
+    }
+
     default:
       return { summary: `Herramienta desconocida: ${name}`, ok: false };
   }
@@ -349,6 +437,26 @@ export async function runPlannedTools(
     }
     if (hint === "get_config") {
       await executeAgentTool("get_config", { section: "summary" }, ctx, artifacts);
+    }
+    if (hint === "list_bulk_projects" && (ctx.bulkProjects?.length ?? 0) > 0) {
+      await executeAgentTool("list_bulk_projects", {}, ctx, artifacts);
+    }
+    if (hint === "get_bulk_project" && (ctx.bulkProjects?.length ?? 0) > 0) {
+      const first = ctx.bulkProjects![0];
+      await executeAgentTool(
+        "get_bulk_project",
+        { project: first.projectName },
+        ctx,
+        artifacts
+      );
+    }
+    if (hint === "search_bulk_projects" && (ctx.bulkProjects?.length ?? 0) > 0) {
+      await executeAgentTool(
+        "search_bulk_projects",
+        { query: ctx.plan.ragQuery },
+        ctx,
+        artifacts
+      );
     }
   }
 }

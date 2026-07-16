@@ -15,6 +15,15 @@ import { getGanttSheetContext } from "@/lib/gantt-extract";
 import { getIndicatorsSheetContext } from "@/lib/indicators-extract";
 import { isGanttActivitiesElement, isIndicatorsTableElement } from "@/lib/sheet-element-routing";
 import type { ExtractConfig, ExtractMethod } from "@/lib/evaluation-type-settings";
+import {
+  buildElementLlmHints,
+  getMandatoryRetryHint,
+} from "@/lib/eval-types/extract-hints";
+import {
+  DEFAULT_EXTRACT_SYSTEM_PROMPT,
+  DEFAULT_EXTRACT_SYSTEM_PROMPT_IMET,
+} from "@/lib/eval-types/prompt-defaults";
+import { isImet } from "@/lib/eval-types/constants";
 
 export type ExtractElementResult = {
   content: string;
@@ -22,9 +31,14 @@ export type ExtractElementResult = {
   confidence: string;
 };
 
-const MANDATORY_LLM_HINT_DEFAULT = `
-
-IMPORTANTE: Este campo NO puede quedar vacío. Usa las herramientas para revisar todo el proyecto (hoja Resumen Proyecto, Gantt, Indicadores, PDF). Si no encuentras el texto exacto del título, busca por la descripción del elemento y sinónimos.`;
+export type HybridExtractOptions = {
+  timeoutMs?: number;
+  extraHints?: string;
+  skipDeterministic?: boolean;
+  extractConfig?: ExtractConfig;
+  /** Nombre del tipo de evaluación (IGIP / IMET) para pistas y reintento hardcodeados. */
+  evaluationTypeName?: string | null;
+};
 
 function extractMethodAllowed(element: ElementDef, method: ExtractMethod): boolean {
   const preferred = element.extractStrategy?.preferredMethods;
@@ -73,15 +87,23 @@ function isImetQaElement(element: ElementDef): boolean {
 async function runLlmExtract(
   sessionId: string,
   element: ElementDef,
-  options?: { timeoutMs?: number; extraHints?: string; extractConfig?: ExtractConfig },
+  options?: HybridExtractOptions,
   extraHints = ""
 ): Promise<ExtractElementResult> {
-  const hints = buildElementLlmHints(element, options?.extractConfig);
+  const hints = buildElementLlmHints(element, options?.evaluationTypeName);
   const combinedHints = hints + (options?.extraHints ?? "") + extraHints;
+  const customSystem = options?.extractConfig?.prompts?.system?.trim();
+  const systemPrompt =
+    customSystem ||
+    (isImet(options?.evaluationTypeName)
+      ? DEFAULT_EXTRACT_SYSTEM_PROMPT_IMET
+      : DEFAULT_EXTRACT_SYSTEM_PROMPT);
   const { extractElementLlmFirst } = await import("@/lib/project-extract-llm");
   return extractElementLlmFirst(sessionId, element, {
     timeoutMs: options?.timeoutMs,
     extraHints: combinedHints,
+    systemPrompt,
+    extractConfig: options?.extractConfig,
   });
 }
 
@@ -90,14 +112,18 @@ async function ensureNonEmpty(
   sessionId: string,
   element: ElementDef,
   result: ExtractElementResult,
-  options?: { timeoutMs?: number; extractConfig?: ExtractConfig }
+  options?: HybridExtractOptions
 ): Promise<ExtractElementResult> {
   if (result.content.trim()) return result;
 
-  const retryHint = options?.extractConfig?.mandatoryLlmRetryHint ?? MANDATORY_LLM_HINT_DEFAULT;
+  const retryHint = getMandatoryRetryHint(
+    options?.evaluationTypeName,
+    options?.extractConfig?.hintOverrides
+  );
   const retry = await runLlmExtract(sessionId, element, {
-    timeoutMs: (options?.timeoutMs ?? 45_000) + 20_000,
+    timeoutMs: (options?.timeoutMs ?? 45_000) + (options?.extractConfig?.retry.emptyRetryExtraTimeoutMs ?? 20_000),
     extractConfig: options?.extractConfig,
+    evaluationTypeName: options?.evaluationTypeName,
   }, retryHint);
 
   if (retry.content.trim()) {
@@ -136,11 +162,13 @@ export function tryDeterministicExtract(
 
   const heuristic = extractElementHeuristic(structuredFiles, element, {
     sheetPatterns: extractConfig?.sheetPatterns,
+    heuristics: extractConfig?.heuristics,
   });
   const content = heuristic.content.trim();
   if (!content || !isAcceptableExtractedContent(element, content)) return null;
 
-  if (isHighConfidenceHeuristic(heuristic.confidence)) {
+  const highConfidenceMin = extractConfig?.heuristics.highConfidenceMin ?? 0.72;
+  if (isHighConfidenceHeuristic(heuristic.confidence, highConfidenceMin)) {
     return {
       content,
       method: `excel:${heuristic.method}`,
@@ -183,93 +211,6 @@ export function tryDeterministicExtract(
   return null;
 }
 
-export function buildElementLlmHints(element: ElementDef, extractConfig?: ExtractConfig): string {
-  const hints: string[] = [];
-
-  if (extractConfig?.globalLlmHints?.trim()) {
-    hints.push(extractConfig.globalLlmHints.trim());
-  }
-  if (element.extractStrategy?.llmHints?.trim()) {
-    hints.push(element.extractStrategy.llmHints.trim());
-  }
-
-  if (/necesidad|problema|oportunidad/i.test(element.title)) {
-    hints.push(
-      'Busca la fila cuya etiqueta contiene "Necesidad, problema u oportunidad". El texto puede ocupar varias columnas fusionadas en la hoja "Resumen Proyecto".'
-    );
-  }
-
-  if (isSolutionAdvanceElement(element)) {
-    hints.push(
-      'Busca la fila cuya etiqueta contiene "En qué consiste la solución", "nivel de avance" o "qué avances has logrado" en Resumen Proyecto o columna de preguntas.'
-    );
-    hints.push(
-      `Reglas para nivel de avance:
-- Busca la fila "En qué consiste la solución", "qué avances has logrado" o similar.
-- Distingue lo PLANIFICADO de lo YA EJECUTADO.
-- Si el documento dice "nace desde cero" o que aún no ha iniciado, repórtalo así.
-- Transcribe o sintetiza fielmente lo que dice el documento sobre la solución y el avance actual.`
-    );
-  }
-
-  if (/avance actual/i.test(element.title)) {
-    hints.push(
-      'En formularios IMET (columna pregunta / columna respuesta), busca la pregunta sobre avances logrados hasta ahora.'
-    );
-  }
-
-  if (/nombre del proyecto/i.test(element.title)) {
-    hints.push(
-      'En formularios IMET, el nombre suele estar en la respuesta a "¿Cuál es el nombre de tu emprendimiento?". No uses la pregunta "Describe brevemente tu emprendimiento".'
-    );
-  }
-
-  if (/origen de la idea|descripci.*emprendimiento/i.test(`${element.title} ${element.description}`)) {
-    hints.push(
-      "En Excel tipo IMET (pregunta en columna A, respuesta en columna B), empareja la pregunta con el elemento y extrae solo la respuesta."
-    );
-  }
-
-  const t = `${element.title} ${element.section ?? ""} ${element.description}`.toLowerCase();
-  if (/ejes?\s+de\s+impacto|focalizaci/.test(t)) {
-    hints.push(
-      'No uses la fila metadata "Focalización". Busca la pregunta narrativa "Ejes de impacto o focalizaciones" en Resumen Proyecto.'
-    );
-  }
-  if (/sostenibilidad|objetivo de desarrollo sostenible|\bods\b/.test(t)) {
-    hints.push(
-      "Extrae la RESPUESTA del proyecto, no la pregunta del formulario."
-    );
-  }
-  if (/factor innovador/.test(t)) {
-    hints.push(
-      'Usa la fila "Factor innovador del proyecto" / "Diferenciación y propuesta de valor" en Seguimiento o Resumen Proyecto.'
-    );
-    hints.push(
-      "NO copies el texto de Continuidad de fases anteriores. Son campos distintos con respuestas distintas."
-    );
-  }
-  if (/escalabilidad/.test(t)) {
-    hints.push(
-      "Responde si existen planes de expansión o replicación; no copies las preguntas del formulario."
-    );
-  }
-  if (isGanttActivitiesElement(element)) {
-    hints.push(
-      element.description ||
-        'Lista solo nombre y descripción de cada actividad desde la hoja Gantt/Cronograma.'
-    );
-  }
-  if (/^indicador/.test(element.title.toLowerCase()) || (t.includes("indicador") && !/metodolog/.test(t))) {
-    hints.push(
-      'Usa la hoja "Indicadores". Estructura cada indicador en bloques numerados con etiquetas claras.'
-    );
-  }
-
-  if (hints.length === 0) return "";
-  return "\n\nPistas adicionales:\n" + hints.map((h) => `- ${h}`).join("\n");
-}
-
 /**
  * Híbrido: Excel estructurado (determinista) → LLM con pistas semánticas.
  * Nunca devuelve vacío sin reintentar con LLM obligatorio.
@@ -277,12 +218,7 @@ export function buildElementLlmHints(element: ElementDef, extractConfig?: Extrac
 export async function extractElementHybrid(
   sessionId: string,
   element: ElementDef,
-  options?: {
-    timeoutMs?: number;
-    extraHints?: string;
-    skipDeterministic?: boolean;
-    extractConfig?: ExtractConfig;
-  }
+  options?: HybridExtractOptions
 ): Promise<ExtractElementResult> {
   const structuredFiles = structuredIndexToExcelFiles(sessionId);
   let result: ExtractElementResult;

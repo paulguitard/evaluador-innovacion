@@ -1,5 +1,6 @@
 import { extractSubdimensionSection } from "@/lib/evaluation-scores";
 import type { RubricConfig } from "@/lib/rubric-config";
+import { EVALUATION_REPORT_LANGUAGE_BULLET } from "@/lib/system-prompts-catalog";
 import { extractGlobalLevelSection, extractVariableSection } from "@/lib/rubric-niveles";
 import {
   condenseProjectElementsForPrompt,
@@ -7,11 +8,13 @@ import {
   type ReportSection,
 } from "@/lib/report-format-config";
 
-/** Tokens de salida para generar la sección completa sin cortar a mitad de frase. */
+/** Tokens de salida para generar la sección completa sin cortar a mitad de frase.
+ *  Reserva un buffer amplio (+2560) para modelos de reasoning que consumen 1000-3000
+ *  tokens en thinking invisible antes de emitir el primer token de content. */
 export function estimateSectionMaxTokens(section: ReportSection): number {
   const targetChars = Math.max(section.minChars, section.maxChars);
-  const estimated = Math.ceil(targetChars / 1.2) + 1024;
-  return Math.min(8192, Math.max(1024, estimated));
+  const estimated = Math.ceil(targetChars / 1.2) + 2560;
+  return Math.min(8192, Math.max(2560, estimated));
 }
 
 /** Cuerpo de la sección sin encabezado markdown. */
@@ -33,14 +36,84 @@ export function isSectionTextComplete(body: string, minChars: number): boolean {
   return !isSectionTextTruncated(t);
 }
 
+const SECTION_CLOSURE_RE = /[.!?»")\]\u2026]$/;
+
+function paragraphEndsCleanly(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  if (SECTION_CLOSURE_RE.test(t)) return true;
+  if (/\*\*[^*]+\*\*$/.test(t)) return true;
+  if (/\)$/.test(t) && /[.!?]/.test(t)) return true;
+  return false;
+}
+
+/** Quita reglas horizontales markdown (`---`, `***`, `___`) del final de un texto. */
+function stripTrailingMarkdownSeparators(text: string): string {
+  return text.replace(/(?:\n+)?\s*(?:-{3,}|\*{3,}|_{3,})\s*$/g, "").trimEnd();
+}
+
 export function isSectionTextTruncated(body: string): boolean {
-  const t = body.trim();
+  const t = stripTrailingMarkdownSeparators(body.trim());
   if (!t) return true;
-  if (/[.!?»")]$/.test(t)) return false;
-  const lastParagraph = t.split(/\n\s*\n/).pop()?.trim() ?? t;
-  if (/[.!?»")]$/.test(lastParagraph)) return false;
+  if (paragraphEndsCleanly(t)) return false;
+
+  const paragraphs = t
+    .split(/\n\s*\n/)
+    .map((p) => stripTrailingMarkdownSeparators(p.trim()))
+    .filter(Boolean);
+  const lastParagraph = paragraphs.at(-1) ?? t;
+  if (paragraphEndsCleanly(lastParagraph)) return false;
+
+  if (paragraphs.length > 1) {
+    const prev = paragraphs.at(-2) ?? "";
+    if (paragraphEndsCleanly(prev) && lastParagraph.length <= 80) {
+      if (/^#{1,3}\s/.test(lastParagraph)) return false;
+      if (/^\*\*[^*]+\*\*\s*:?\s*[\d,.]+/.test(lastParagraph)) return false;
+    }
+  }
+
   if (lastParagraph.length <= 4) return true;
   return true;
+}
+
+const LIGHT_TRUNCATION_PARAGRAPH_MAX = 40;
+
+/** Truncación leve: cumple minChars pero el último párrafo es un fragmento corto sin cierre. */
+export function isLightTruncationOnly(section: ReportSection, llmText: string): boolean {
+  const body = extractSectionBody(llmText, section.title);
+  if (!body || body.length < section.minChars) return false;
+  if (!isSectionTextTruncated(body)) return false;
+
+  const paragraphs = body
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const lastParagraph = paragraphs.at(-1) ?? body;
+  return lastParagraph.length < LIGHT_TRUNCATION_PARAGRAPH_MAX;
+}
+
+export function sectionAcceptsLightTruncation(section: ReportSection): boolean {
+  if (section.kind === "dimension_overview") return true;
+  if (section.kind === "custom" && !/síntesis|sintesis/i.test(section.title)) return true;
+  return false;
+}
+
+export function getSectionRejectionReason(
+  section: ReportSection,
+  llmText: string
+): string {
+  const body = extractSectionBody(llmText, section.title);
+  if (!body) return "empty_body";
+  if (body.length < section.minChars) return `too_short:${body.length}<${section.minChars}`;
+  if (isSectionTextTruncated(body)) return "truncated";
+  if (
+    section.kind === "custom" &&
+    /resumen.*proyecto|proyecto.*resumen/i.test(section.title) &&
+    /^(nombre del proyecto|objetivo general|objetivos específicos)/im.test(llmText)
+  ) {
+    return "raw_project_paste";
+  }
+  return "unknown";
 }
 
 export function buildIncompleteSectionRetryUser(
@@ -50,12 +123,26 @@ export function buildIncompleteSectionRetryUser(
   return `Tu respuesta anterior quedó INCOMPLETA o demasiado corta. Reescribe la sección COMPLETA desde cero.
 
 Requisitos:
-- Entre ${section.minChars} y ${section.maxChars} caracteres.
+- ${EVALUATION_REPORT_LANGUAGE_BULLET}
+- Extensión: ${describeLengthTarget(section)}.
 - Texto íntegro: todas las oraciones deben cerrar con punto (nunca cortes a mitad de palabra ni de frase).
 - Encabezado ## ${section.title}.
+- No cuentes caracteres uno a uno: escribe el texto directamente con la extensión indicada.
 
 Material fuente:
 ${sourceMaterial.slice(0, 8000)}`;
+}
+
+/**
+ * Describe la extensión objetivo en términos CUALITATIVOS (párrafos/oraciones)
+ * en vez de un rango exacto de caracteres. Los rangos numéricos exactos hacen
+ * que algunos modelos de reasoning entren en modo obsesivo contando letra por
+ * letra, consumiendo todo su presupuesto de tokens sin llegar a producir texto.
+ */
+function describeLengthTarget(section: ReportSection): string {
+  const avg = Math.round((section.minChars + section.maxChars) / 2);
+  const paragraphs = section.kind === "dimension_overview" ? "1–2 párrafos" : "2–4 párrafos";
+  return `${paragraphs} de prosa continua (~${avg} caracteres, sin necesidad de contar exactamente)`;
 }
 
 function isProjectSummarySection(section: ReportSection): boolean {
@@ -94,12 +181,13 @@ SECCIÓN A REDACTAR:
 **${section.title}**
 Descripción: ${section.description}
 
-LONGITUD OBLIGATORIA:
-- Entre ${section.minChars} y ${section.maxChars} caracteres (cuenta espacios y signos).
-- Si el borrador es más corto, EXPANDE con detalle técnico del análisis sin inventar hechos.
-- PROHIBIDO resumir por debajo del mínimo de ${section.minChars} caracteres.
+EXTENSIÓN:
+- ${describeLengthTarget(section)}.
+- Si el borrador es demasiado corto, EXPANDE con detalle técnico del análisis sin inventar hechos.
+- NO cuentes caracteres uno a uno: escribe con la extensión indicada de forma natural.
 
 REGLAS:
+- ${EVALUATION_REPORT_LANGUAGE_BULLET}
 - Responde SOLO con el contenido de esta sección (incluye un encabezado ## ${section.title} o equivalente).
 - No añadas otras secciones del informe.
 - No incluyas anotaciones de límite de caracteres en el texto final.
@@ -111,12 +199,14 @@ function buildProjectSummarySystemPrompt(section: ReportSection): string {
 
 OBJETIVO: síntesis narrativa del proyecto en prosa continua (1–3 párrafos).
 
-LONGITUD OBLIGATORIA: entre ${section.minChars} y ${section.maxChars} caracteres.
+EXTENSIÓN: ${describeLengthTarget(section)}.
 
 REGLAS ESTRICTAS:
+- ${EVALUATION_REPORT_LANGUAGE_BULLET}
 - NO copies ni listes los campos extraídos del proyecto.
 - NO uses etiquetas como «Objetivo General», «Nombre del proyecto», etc.
 - NO uses viñetas ni listas numeradas.
+- NO cuentes caracteres uno a uno: escribe con la extensión indicada de forma natural.
 - Integra la información en un texto fluido que presente qué es el proyecto, su contexto y su propósito.
 - Entrega el texto ÍNTEGRO: nunca lo cortes ni lo trunques; cierra cada oración con punto final.
 - Responde con encabezado ## ${section.title} y el texto del resumen.`;
@@ -127,14 +217,15 @@ function buildDimensionOverviewSystemPrompt(section: ReportSection): string {
 
 OBJETIVO: resumen macro de la dimensión sintetizando las evaluaciones de sus subdimensiones.
 
-LONGITUD OBLIGATORIA: entre ${section.minChars} y ${section.maxChars} caracteres.
-- Debes alcanzar al menos ${section.minChars} caracteres con frases completas.
+EXTENSIÓN: ${describeLengthTarget(section)}.
 - PROHIBIDO truncar con puntos suspensivos («…» o «...») a mitad de idea.
+- NO cuentes caracteres uno a uno: redacta con naturalidad.
 
 REGLAS:
+- ${EVALUATION_REPORT_LANGUAGE_BULLET}
 - Sintetiza hallazgos y conclusiones de las subdimensiones; no re-evalúes ni cambies notas.
 - Texto en prosa continua (1–2 párrafos), sin viñetas.
-- Entrega el texto ÍNTEGRO dentro del rango de caracteres; nunca lo cortes a mitad de palabra ni de frase.
+- Entrega el texto ÍNTEGRO; nunca lo cortes a mitad de palabra ni de frase.
 - Responde con encabezado ## ${section.title} y el resumen.`;
 }
 
@@ -143,15 +234,16 @@ export function buildFinalSynthesisSystemPrompt(section: ReportSection): string 
 
 OBJETIVO: conclusión evaluativa global de toda la evaluación (todas las dimensiones).
 
-LONGITUD OBLIGATORIA: entre ${section.minChars} y ${section.maxChars} caracteres.
-- Desarrolla al menos ${section.minChars} caracteres en 2–4 párrafos completos.
+EXTENSIÓN: ${describeLengthTarget(section)}.
+- NO cuentes caracteres uno a uno: redacta con naturalidad la extensión indicada.
 
 REGLAS:
+- ${EVALUATION_REPORT_LANGUAGE_BULLET}
 - Resume el veredicto evaluativo: fortalezas, debilidades y conclusión.
 - Puedes mencionar la nota global del indicador si se proporciona.
 - NO describas el proyecto, sus actividades ni beneficiarios en detalle.
 - NO uses viñetas ni listas.
-- Entrega la síntesis ÍNTEGRA dentro del rango de caracteres; nunca la cortes a mitad de frase.
+- Entrega la síntesis ÍNTEGRA; nunca la cortes a mitad de frase.
 - Responde con encabezado ## ${section.title} y el texto de la síntesis.`;
 }
 
@@ -169,15 +261,16 @@ export function buildFinalSynthesisSystemPromptForLevels(
 
 OBJETIVO: conclusión evaluativa global según la escala de niveles (no hay subdimensiones ni notas numéricas).
 
-LONGITUD OBLIGATORIA: entre ${section.minChars} y ${section.maxChars} caracteres.
-- Desarrolla al menos ${section.minChars} caracteres en 2–4 párrafos completos.
+EXTENSIÓN: ${describeLengthTarget(section)}.
+- NO cuentes caracteres uno a uno: redacta con naturalidad la extensión indicada.
 
 REGLAS:
+- ${EVALUATION_REPORT_LANGUAGE_BULLET}
 - ${levelLine}
 - Sintetiza fortalezas, brechas y por qué corresponde ese nivel (no otro adyacente).
 - Puedes referirte al emprendimiento o proyecto de forma evaluativa; NO repitas el resumen del proyecto ni listes actividades.
 - NO uses viñetas ni listas.
-- Entrega la síntesis ÍNTEGRA dentro del rango de caracteres; nunca la cortes a mitad de frase.
+- Entrega la síntesis ÍNTEGRA; nunca la cortes a mitad de frase.
 - Responde con encabezado ## ${section.title} y el texto de la síntesis.`;
 }
 

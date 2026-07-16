@@ -16,17 +16,18 @@ import {
   multiChapterComparisonPlan,
   projectOnlyPlan,
   configOnlyPlan,
+  bulkEvaluationPlan,
 } from "@/lib/context-plan";
 import type { ContextMode } from "@/lib/rag-limits";
 import { loadChatAgentConfig } from "@/lib/chat-agent-config-server";
 import type { ChatAgentConfig } from "@/lib/chat-agent-config";
+import {
+  applyHardRules,
+  type RouterInput,
+} from "@/lib/context-router-rules";
 
-export type RouterInput = {
-  message: string;
-  hasProjectData: boolean;
-  hasRubric: boolean;
-  hasKnowledge: boolean;
-};
+export type { RouterInput } from "@/lib/context-router-rules";
+export { asksScoreImprovement, applyHardRules } from "@/lib/context-router-rules";
 
 function intentToDefaultPlan(
   intent: string,
@@ -47,121 +48,16 @@ function intentToDefaultPlan(
       agentConfig
     );
   }
+  if (input.hasBulkEvaluationData && !input.hasProjectData) {
+    return bulkEvaluationPlan(message, agentConfig);
+  }
   if (intent === "knowledge") {
     return knowledgeOnlyPlan(message, undefined, undefined, agentConfig);
   }
   if (intent === "project") {
-    return projectOnlyPlan(message);
+    return projectOnlyPlan(message, agentConfig);
   }
-  return configOnlyPlan();
-}
-
-function applyHardRules(
-  plan: ContextPlan,
-  message: string,
-  input: RouterInput,
-  agentConfig: ChatAgentConfig
-): ContextPlan {
-  const m = message.toLowerCase();
-  let p = { ...plan };
-
-  const asksRubric =
-    /\br[uú]brica\b/i.test(message) ||
-    /\bcriterios?\s+de\s+evaluaci[oó]n\b/i.test(message) ||
-    /\bigip\b/i.test(message);
-  const asksKnowledge =
-    /\b(manual|knowledge|oslo|marco\s+te[oó]rico)\b/i.test(message) ||
-    /\bqu[eé]\s+es\s+la\s+innovaci[oó]n\b/i.test(message);
-  const asksProject = /\bproyecto\b/i.test(message) || input.hasProjectData;
-  const asksConfig =
-    /\b(evaluaci[oó]n|formato\s+del\s+informe|elementos?\s+a\s+identificar|configuraci[oó]n)\b/i.test(
-      message
-    );
-
-  const chapterNumbers = parseChaptersFromQuery(message);
-  const multiChapter = chapterNumbers.length >= 2 || isChapterComparisonQuery(message);
-
-  if (multiChapter && asksKnowledge && !asksRubric && !asksConfig) {
-    const nums =
-      chapterNumbers.length >= 2 ? chapterNumbers : chapterNumbers.length === 1 ? chapterNumbers : [];
-    if (nums.length >= 2) {
-      p = multiChapterComparisonPlan(p.ragQuery || message, nums, agentConfig);
-    }
-  } else if (asksKnowledge && !asksRubric && !asksConfig) {
-    p = knowledgeOnlyPlan(p.ragQuery || message, p.pageNumber, p.chapterNumber, agentConfig);
-    if (asksProject && input.hasProjectData) {
-      p.sources = ["knowledge_rag", "project", "project_structured"];
-      p.excludeSources = ["rubric", "report_format", "config_summary"];
-      p.agentLevel = "B";
-      p.complexity = "moderate";
-      p.useToolLoop = true;
-      p.intent = "mixed";
-      p.intentLabel = "Manual y proyecto";
-      p.toolsHint = ["search_knowledge", "get_project_elements"];
-    }
-  }
-
-  if (asksRubric) {
-    p.sources = [...new Set([...p.sources, "rubric"])] as ContextPlan["sources"];
-    p.excludeSources = p.excludeSources.filter((s) => s !== "rubric");
-  }
-
-  if (asksRubric && asksKnowledge) {
-    p.sources = [...new Set([...p.sources, "knowledge_rag", "rubric"])] as ContextPlan["sources"];
-    p.excludeSources = p.excludeSources.filter(
-      (s) => s !== "rubric" && s !== "knowledge_rag"
-    );
-    p.agentLevel = "C";
-    p.complexity = "complex";
-    p.useToolLoop = true;
-    p.intent = "mixed";
-    p.intentLabel = "Evaluación de rúbrica según manual";
-    p.toolsHint = [...new Set([...p.toolsHint, "search_knowledge", "get_rubric"])];
-    p.responseRules = [
-      "Responde en español evaluando si la rúbrica está bien formulada según el manual de referencia.",
-      "DEBES usar el texto de la rúbrica configurada y los fragmentos del Knowledge en tu respuesta.",
-      "Indica fortalezas, debilidades y recomendaciones concretas de mejora.",
-    ];
-  } else if (asksRubric && !asksKnowledge) {
-    p.sources = [...new Set([...p.sources, "config_summary"])] as ContextPlan["sources"];
-  }
-
-  if (asksConfig && !asksKnowledge && !asksProject) {
-    p = { ...configOnlyPlan(), ...p, sources: configOnlyPlan().sources };
-  }
-
-  const comparesMultiple =
-    (asksKnowledge && asksProject) ||
-    (asksKnowledge && asksRubric) ||
-    /\bcompar(a|ar|ación)\b/i.test(m) ||
-    /\bseg[uú]n\s+el\s+manual\b.*\bproyecto\b/i.test(m) ||
-    /\bmanual\b.*\by\b.*\bproyecto\b/i.test(m);
-
-  if (comparesMultiple) {
-    if (multiChapter && asksKnowledge && chapterNumbers.length >= 2) {
-      p = multiChapterComparisonPlan(p.ragQuery || message, chapterNumbers, agentConfig);
-    } else {
-      p.agentLevel = "C";
-      p.complexity = "complex";
-      p.useToolLoop = true;
-      p.toolsHint = ["search_knowledge", "get_project_elements", "get_rubric", "get_config"];
-    }
-  } else if (p.useToolLoop && p.agentLevel === "A") {
-    p.agentLevel = "B";
-    p.complexity = "moderate";
-  }
-
-  if (!input.hasProjectData) {
-    p.sources = p.sources.filter((s) => s !== "project" && s !== "project_structured");
-  }
-  if (!input.hasRubric) {
-    p.sources = p.sources.filter((s) => s !== "rubric");
-  }
-  if (!input.hasKnowledge) {
-    p.sources = p.sources.filter((s) => s !== "knowledge_rag");
-  }
-
-  return validateAndNormalizePlan(p, configOnlyPlan());
+  return configOnlyPlan(agentConfig);
 }
 
 function parseRouterJson(raw: string): Partial<ContextPlan> | null {
@@ -197,7 +93,7 @@ export async function routeContextPlan(input: RouterInput): Promise<ContextPlan>
   const regexIntent =
     pageNumber != null || chapterNumber != null || multiChapterCompare
       ? "knowledge"
-      : classifyChatIntent(input.message, input.hasProjectData);
+      : classifyChatIntent(input.message, input.hasProjectData || !!input.hasBulkEvaluationData);
   const contextMode: ContextMode =
     chapterNumber != null && !multiChapterCompare
       ? "chat-chapter"
@@ -237,6 +133,7 @@ export async function routeContextPlan(input: RouterInput): Promise<ContextPlan>
 
 Disponibilidad:
 - Proyecto subido: ${input.hasProjectData ? "sí" : "no"}
+- Evaluación masiva completada: ${input.hasBulkEvaluationData ? "sí" : "no"}
 - Rúbrica configurada: ${input.hasRubric ? "sí" : "no"}
 - Knowledge indexado: ${input.hasKnowledge ? "sí" : "no"}`,
         },

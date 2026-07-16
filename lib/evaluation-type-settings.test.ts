@@ -38,4 +38,21 @@ describe("mergeEvaluationTypeSettings", () => {
     assert.ok(merged.rag.chunkSizeChars >= 200);
     assert.ok(merged.rag.overlapChars <= merged.rag.chunkSizeChars);
   });
+
+  it("aplica prompts IGIP por defecto", () => {
+    const merged = mergeEvaluationTypeSettings(null, "IGIP");
+    assert.match(merged.extract.agent.userPromptTemplate, /Contexto IGIP/);
+    assert.match(merged.extract.duplicateGuard.retryHintBody, /Factor innovador/);
+    assert.match(merged.extract.vision.indexPrompt, /Objetivo general/);
+    assert.match(merged.extract.prompts?.system ?? "", /bitácoras Excel IGIP/i);
+  });
+
+  it("aplica prompts IMET por defecto", () => {
+    const merged = mergeEvaluationTypeSettings(null, "IMET");
+    assert.match(merged.extract.agent.userPromptTemplate, /Contexto IMET/);
+    assert.doesNotMatch(merged.extract.duplicateGuard.retryHintBody, /Factor innovador/);
+    assert.match(merged.extract.vision.indexPrompt, /emprendimiento/i);
+    assert.match(merged.extract.sheetPatterns.resumen, /imet/);
+    assert.match(merged.extract.prompts?.system ?? "", /formularios IMET/i);
+  });
 });

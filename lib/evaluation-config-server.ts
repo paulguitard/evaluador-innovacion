@@ -19,12 +19,14 @@ export async function getEvaluationConfig(evaluationTypeId: number): Promise<Eva
   if (!config) {
     return mergeEvaluationConfig(null, type?.name);
   }
+  const rubric_config = parseJson(config.rubric_config);
   return mergeEvaluationConfig(
     {
       evaluation_config: parseJson(config.evaluation_config),
       pipeline_config: parseJson(config.pipeline_config),
       report_format_config: parseJson(config.report_format_config),
       rag_config: parseJson(config.rag_config),
+      rubric_config,
     },
     type?.name
   );

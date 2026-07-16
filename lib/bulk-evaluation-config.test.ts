@@ -8,7 +8,7 @@ import {
 describe("bulk-evaluation-config", () => {
   it("defaults incluyen índice local activo", () => {
     const d = defaultBulkEvaluationConfig();
-    assert.equal(d.parallelProjects, 3);
+    assert.equal(d.parallelProjects, 2);
     assert.equal(d.useClientKnowledgeIndex, true);
     assert.equal(d.preloadKnowledgeOnBulkStart, true);
   });

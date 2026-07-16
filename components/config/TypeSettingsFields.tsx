@@ -1,11 +1,13 @@
 "use client";
 
+import type { ReactNode } from "react";
 import type {
-  PipelineConfig,
   RagConfig,
   ExtractConfig,
   ElementDefConfig,
 } from "@/lib/evaluation-type-settings";
+import { ExtractAdvancedConfigFields } from "@/components/config/ExtractAdvancedConfigFields";
+import { fixedKeyFor } from "@/lib/eval-types/constants";
 import type { ContextMode } from "@/lib/rag-limits";
 
 /** Modos de chat; los límites de evaluación viven en §5 (evaluation_config.ragEvaluate). */
@@ -19,114 +21,68 @@ const CHAT_CONTEXT_MODES: ContextMode[] = [
 const inputClass =
   "w-full rounded border border-gray-300 px-2 py-1.5 text-xs dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100";
 const textareaClass = `${inputClass} min-h-[72px] resize-y font-mono`;
+const fieldHintClass = "mb-1 text-[10px] leading-snug text-gray-500 dark:text-gray-400";
 
-export function PipelineConfigFields({
-  pipeline,
-  onChange,
-  compact = false,
+const CHAT_MODE_DESCRIPTIONS: Record<(typeof CHAT_CONTEXT_MODES)[number], string> = {
+  "chat-knowledge":
+    "Chat centrado en los documentos de referencia (Knowledge): recupera fragmentos del índice RAG de manuales y guías.",
+  "chat-project":
+    "Chat sobre el proyecto cargado: prioriza fragmentos del índice del proyecto (Excel/PDF subido).",
+  "chat-chapter":
+    "Chat sobre un capítulo concreto del manual: usa el texto del capítulo seleccionado como contexto principal.",
+  "chat-config":
+    "Chat sobre la configuración del tipo de evaluación (rúbrica, elementos, etc.) sin consultar Knowledge.",
+};
+
+const RAG_LIMIT_HINTS = {
+  topK: "Cantidad máxima de fragmentos que se recuperan del índice en cada búsqueda.",
+  maxRetrievedChars: "Tope total de caracteres sumando todos los fragmentos recuperados.",
+  maxSystemChars: "Tamaño máximo del mensaje system enviado al LLM (contexto + instrucciones).",
+} as const;
+
+const EXTRACT_FIELD_HINTS = {
+  elementTimeoutMs:
+    "Tiempo máximo (en milisegundos) que espera la extracción de cada elemento antes de marcar timeout o pasar al siguiente método.",
+  systemPrompt:
+    "Rol y reglas del agente LLM al extraer cada elemento (búsqueda en Excel/PDF, formato JSON). Si lo dejas vacío y guardas, se usa el prompt por defecto de IGIP o IMET definido en código.",
+  sheetPatternGantt:
+    "Expresión regular para detectar la hoja de carta Gantt o cronograma en el Excel del proyecto.",
+  sheetPatternIndicators:
+    "Expresión regular para localizar la hoja de indicadores de gestión.",
+  sheetPatternResumen:
+    "Expresión regular para la hoja resumen o ficha del proyecto (IGIP: Resumen Proyecto; IMET: ficha/formulario).",
+  structurePromptGantt:
+    "Instrucciones al LLM para convertir los datos crudos de la hoja Gantt en una lista numerada legible.",
+  structurePromptIndicators:
+    "Instrucciones al LLM para estructurar cada fila de la tabla de indicadores en bloques claros.",
+} as const;
+
+const ELEMENT_STRATEGY_HINTS = {
+  skipDeterministic:
+    "Si está activo, se omiten heurísticas y form_row; el elemento se resuelve solo con métodos LLM (rag_llm, gantt, indicators, etc.).",
+  llmHints:
+    "Pistas solo para este elemento: sinónimos de la etiqueta en el Excel, hoja donde suele aparecer, formato del valor, etc.",
+  preferredMethods:
+    "Orden de métodos a probar (heuristic, form_row, gantt, indicators, rag_llm, vision). Vacío = orden por defecto del sistema.",
+  sheetPriority:
+    "Nombres de hojas Excel (en orden) donde buscar primero este elemento antes que el resto del libro.",
+} as const;
+
+function ConfigFieldLabel({
+  title,
+  hint,
+  children,
 }: {
-  pipeline: PipelineConfig;
-  onChange: (p: PipelineConfig) => void;
-  /** Layout denso para la celda 1 del panel de configuración. */
-  compact?: boolean;
+  title: string;
+  hint: string;
+  children: ReactNode;
 }) {
-  const set = <K extends keyof PipelineConfig>(key: K, val: PipelineConfig[K]) =>
-    onChange({ ...pipeline, [key]: val });
-
-  const coreFields = (
-    <>
-      <div className={compact ? "grid grid-cols-2 gap-1.5" : "grid grid-cols-2 gap-2"}>
-        <label className="text-xs">
-          <span className="mb-0.5 block text-[10px] uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            Etiqueta índice
-          </span>
-          <input
-            className={inputClass}
-            value={pipeline.indicatorLabel}
-            onChange={(e) => set("indicatorLabel", e.target.value)}
-          />
-        </label>
-        <label
-          className={`flex items-end gap-2 text-xs ${compact ? "" : "col-span-1"}`}
-        >
-          <input
-            type="checkbox"
-            checked={pipeline.parallelSubdimensions}
-            onChange={(e) => set("parallelSubdimensions", e.target.checked)}
-          />
-          Subdimensiones en paralelo
-        </label>
-        <label
-          className={`flex items-end gap-2 text-xs ${compact ? "" : "col-span-1"}`}
-        >
-          <input
-            type="checkbox"
-            checked={pipeline.parallelDimensions}
-            onChange={(e) => set("parallelDimensions", e.target.checked)}
-          />
-          Dimensiones en paralelo
-        </label>
-      </div>
-    </>
-  );
-
-  const advanced = (
-    <details className="text-xs">
-      <summary className="cursor-pointer font-medium text-gray-600 dark:text-gray-400">
-        Tokens y prompts
-      </summary>
-      <div className="mt-1.5 grid grid-cols-2 gap-1.5">
-        {(Object.keys(pipeline.maxTokens) as Array<keyof PipelineConfig["maxTokens"]>).map(
-          (k) => (
-            <label key={k} className="text-xs">
-              {k}
-              <input
-                type="number"
-                className={inputClass}
-                value={pipeline.maxTokens[k]}
-                onChange={(e) =>
-                  set("maxTokens", { ...pipeline.maxTokens, [k]: Number(e.target.value) })
-                }
-              />
-            </label>
-          )
-        )}
-      </div>
-      <label className="mt-1.5 block">
-        Prompt JSON notas
-        <textarea
-          className={textareaClass}
-          value={pipeline.prompts.scoreJsonSystem ?? ""}
-          onChange={(e) =>
-            set("prompts", { ...pipeline.prompts, scoreJsonSystem: e.target.value })
-          }
-        />
-      </label>
-    </details>
-  );
-
-  if (compact) {
-    return (
-      <div className="space-y-1.5 rounded-md border border-gray-200/80 bg-gray-50/60 p-2 dark:border-gray-600/80 dark:bg-gray-900/30">
-        <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-          Pipeline
-        </div>
-        {coreFields}
-        <div className="pt-0.5">{advanced}</div>
-      </div>
-    );
-  }
-
   return (
-    <details className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 dark:border-gray-600 dark:bg-gray-900/40">
-      <summary className="cursor-pointer text-xs font-semibold uppercase text-gray-600 dark:text-gray-400">
-        Pipeline de evaluación
-      </summary>
-      <div className="mt-2 space-y-2">
-        {coreFields}
-        {advanced}
-      </div>
-    </details>
+    <label className="block text-xs">
+      <span className="mb-0.5 block font-medium text-gray-700 dark:text-gray-200">{title}</span>
+      <p className={fieldHintClass}>{hint}</p>
+      {children}
+    </label>
   );
 }
 
@@ -152,61 +108,110 @@ export function RagConfigFields({
       <summary className="cursor-pointer text-xs font-semibold uppercase text-gray-600 dark:text-gray-400">
         Parámetros RAG
       </summary>
+      <p className={`mt-2 ${fieldHintClass}`}>
+        Ajustan cómo se fragmentan los documentos de Knowledge al indexar y cuánto contexto
+        recupera el chat al buscar en ese índice. La evaluación técnica usa parámetros propios en
+        el submenú «Evaluación».
+      </p>
       <div className="mt-2 space-y-2">
       <div className="grid grid-cols-2 gap-2">
-        <label className="text-xs">
-          Chunk (caracteres)
+        <ConfigFieldLabel
+          title="Chunk (caracteres)"
+          hint="Tamaño de cada fragmento al dividir los PDF/Word al reindexar. Fragmentos más grandes conservan más contexto por trozo; más pequeños mejoran la precisión de la búsqueda."
+        >
           <input
             type="number"
             className={inputClass}
             value={rag.chunkSizeChars}
             onChange={(e) => onChange({ ...rag, chunkSizeChars: Number(e.target.value) })}
           />
-        </label>
-        <label className="text-xs">
-          Solapamiento
+        </ConfigFieldLabel>
+        <ConfigFieldLabel
+          title="Solapamiento"
+          hint="Caracteres que se repiten entre fragmentos consecutivos para no cortar frases o tablas a la mitad en el límite del chunk."
+        >
           <input
             type="number"
             className={inputClass}
             value={rag.overlapChars}
             onChange={(e) => onChange({ ...rag, overlapChars: Number(e.target.value) })}
           />
-        </label>
+        </ConfigFieldLabel>
+        <ConfigFieldLabel
+          title="Query prompt (chars)"
+          hint="Máximo de caracteres del mensaje del usuario que se usan para formular la consulta de búsqueda semántica en el índice."
+        >
+          <input
+            type="number"
+            className={inputClass}
+            value={rag.queryLimits.ragQueryPromptChars}
+            onChange={(e) =>
+              onChange({
+                ...rag,
+                queryLimits: {
+                  ...rag.queryLimits,
+                  ragQueryPromptChars: Number(e.target.value),
+                },
+              })
+            }
+          />
+        </ConfigFieldLabel>
+        <ConfigFieldLabel
+          title="Query rúbrica (chars)"
+          hint="Máximo de caracteres de la rúbrica o criterio que se añaden a la consulta RAG cuando el contexto incluye criterios de evaluación."
+        >
+          <input
+            type="number"
+            className={inputClass}
+            value={rag.queryLimits.ragQueryRubricChars}
+            onChange={(e) =>
+              onChange({
+                ...rag,
+                queryLimits: {
+                  ...rag.queryLimits,
+                  ragQueryRubricChars: Number(e.target.value),
+                },
+              })
+            }
+          />
+        </ConfigFieldLabel>
       </div>
       <details className="text-xs">
         <summary className="cursor-pointer font-medium">Límites por modo de contexto (chat)</summary>
+        <p className={`mt-1.5 ${fieldHintClass}`}>
+          Cada modo corresponde a un tipo de conversación del agente de chat. Aquí se limita cuánto
+          texto recuperado entra al prompt del LLM en cada caso.
+        </p>
         <div className="mt-2 space-y-2">
           {CHAT_CONTEXT_MODES.map((mode) => (
             <div key={mode} className="rounded border border-gray-200 p-2 dark:border-gray-700">
-              <div className="mb-1 font-medium">{mode}</div>
-              <div className="grid grid-cols-3 gap-1">
-                <label>
-                  topK
+              <div className="mb-1 font-medium text-gray-800 dark:text-gray-100">{mode}</div>
+              <p className={fieldHintClass}>{CHAT_MODE_DESCRIPTIONS[mode]}</p>
+              <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <ConfigFieldLabel title="topK" hint={RAG_LIMIT_HINTS.topK}>
                   <input
                     type="number"
                     className={inputClass}
                     value={rag.modes[mode]?.topK ?? 0}
                     onChange={(e) => setMode(mode, "topK", Number(e.target.value))}
                   />
-                </label>
-                <label>
-                  maxRetrieved
+                </ConfigFieldLabel>
+                <ConfigFieldLabel title="maxRetrieved" hint={RAG_LIMIT_HINTS.maxRetrievedChars}>
                   <input
                     type="number"
                     className={inputClass}
                     value={rag.modes[mode]?.maxRetrievedChars ?? 0}
                     onChange={(e) => setMode(mode, "maxRetrievedChars", Number(e.target.value))}
                   />
-                </label>
-                <label>
-                  maxSystem
+                </ConfigFieldLabel>
+                <ConfigFieldLabel title="maxSystem" hint={RAG_LIMIT_HINTS.maxSystemChars}>
                   <input
                     type="number"
                     className={inputClass}
                     value={rag.modes[mode]?.maxSystemChars ?? 0}
                     onChange={(e) => setMode(mode, "maxSystemChars", Number(e.target.value))}
                   />
-                </label>
+                </ConfigFieldLabel>
               </div>
             </div>
           ))}
@@ -275,7 +280,7 @@ const EXTRACT_DIAGNOSTIC_REFERENCE: { codes: string; description: string }[] = [
   },
   {
     codes: ":empty_retry",
-    description: "El elemento quedó vacío y se reintentó con instrucciones más estrictas (mandatoryLlmRetryHint).",
+    description: "El elemento quedó vacío y se reintentó con instrucciones más estrictas (definidas en código según IGIP/IMET).",
   },
   {
     codes: ":dup_retry",
@@ -332,41 +337,45 @@ function ExtractMethodsReference() {
   );
 }
 
-export function ExtractConfigFields({
+function ExtractConfigFieldsContent({
   extract,
   onChange,
+  evaluationTypeName,
 }: {
   extract: ExtractConfig;
   onChange: (e: ExtractConfig) => void;
+  evaluationTypeName?: string | null;
 }) {
   return (
-    <details className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 dark:border-gray-600 dark:bg-gray-900/40">
-      <summary className="cursor-pointer text-xs font-semibold uppercase text-gray-600 dark:text-gray-400">
-        Estrategia de extracción (global)
-      </summary>
-      <div className="mt-2 space-y-2">
-      <label className="block text-xs">
-        Timeout por elemento (ms)
+    <div className="space-y-2">
+      <ConfigFieldLabel title="Timeout por elemento (ms)" hint={EXTRACT_FIELD_HINTS.elementTimeoutMs}>
         <input
           type="number"
           className={inputClass}
           value={extract.elementTimeoutMs}
           onChange={(e) => onChange({ ...extract, elementTimeoutMs: Number(e.target.value) })}
         />
-      </label>
-      <label className="block text-xs">
-        Hints LLM globales
+      </ConfigFieldLabel>
+      <ConfigFieldLabel title="System prompt extracción (LLM + tools)" hint={EXTRACT_FIELD_HINTS.systemPrompt}>
         <textarea
-          className={textareaClass}
-          value={extract.globalLlmHints}
-          onChange={(e) => onChange({ ...extract, globalLlmHints: e.target.value })}
+          className={`${textareaClass} min-h-[120px]`}
+          value={extract.prompts?.system ?? ""}
+          onChange={(e) =>
+            onChange({
+              ...extract,
+              prompts: { ...extract.prompts, system: e.target.value },
+            })
+          }
         />
-      </label>
+      </ConfigFieldLabel>
       <details className="text-xs">
-        <summary className="cursor-pointer font-medium">Patrones de hojas y prompts</summary>
+        <summary className="cursor-pointer font-medium">Patrones de hojas y prompts de estructura</summary>
+        <p className={`mt-1.5 ${fieldHintClass}`}>
+          Regex y prompts que guían la detección de hojas especiales (Gantt, indicadores, resumen) y cómo el LLM
+          formatea su contenido al extraer elementos concretos.
+        </p>
         <div className="mt-2 space-y-2">
-          <label className="block">
-            Patrón Gantt (regex)
+          <ConfigFieldLabel title="Patrón Gantt (regex)" hint={EXTRACT_FIELD_HINTS.sheetPatternGantt}>
             <input
               className={inputClass}
               value={extract.sheetPatterns.gantt}
@@ -377,9 +386,32 @@ export function ExtractConfigFields({
                 })
               }
             />
-          </label>
-          <label className="block">
-            Prompt estructura Gantt
+          </ConfigFieldLabel>
+          <ConfigFieldLabel title="Patrón Indicadores (regex)" hint={EXTRACT_FIELD_HINTS.sheetPatternIndicators}>
+            <input
+              className={inputClass}
+              value={extract.sheetPatterns.indicators}
+              onChange={(e) =>
+                onChange({
+                  ...extract,
+                  sheetPatterns: { ...extract.sheetPatterns, indicators: e.target.value },
+                })
+              }
+            />
+          </ConfigFieldLabel>
+          <ConfigFieldLabel title="Patrón Resumen / ficha (regex)" hint={EXTRACT_FIELD_HINTS.sheetPatternResumen}>
+            <input
+              className={inputClass}
+              value={extract.sheetPatterns.resumen}
+              onChange={(e) =>
+                onChange({
+                  ...extract,
+                  sheetPatterns: { ...extract.sheetPatterns, resumen: e.target.value },
+                })
+              }
+            />
+          </ConfigFieldLabel>
+          <ConfigFieldLabel title="Prompt estructura Gantt" hint={EXTRACT_FIELD_HINTS.structurePromptGantt}>
             <textarea
               className={textareaClass}
               value={extract.structurePrompts.gantt}
@@ -390,9 +422,8 @@ export function ExtractConfigFields({
                 })
               }
             />
-          </label>
-          <label className="block">
-            Prompt estructura Indicadores
+          </ConfigFieldLabel>
+          <ConfigFieldLabel title="Prompt estructura Indicadores" hint={EXTRACT_FIELD_HINTS.structurePromptIndicators}>
             <textarea
               className={textareaClass}
               value={extract.structurePrompts.indicators}
@@ -406,10 +437,62 @@ export function ExtractConfigFields({
                 })
               }
             />
-          </label>
+          </ConfigFieldLabel>
         </div>
       </details>
+      <ExtractAdvancedConfigFields
+        extract={extract}
+        onChange={onChange}
+        evaluationTypeName={evaluationTypeName}
+      />
       <ExtractMethodsReference />
+    </div>
+  );
+}
+
+export function ExtractConfigFields({
+  extract,
+  onChange,
+  embedded = false,
+  evaluationTypeName,
+}: {
+  extract: ExtractConfig;
+  onChange: (e: ExtractConfig) => void;
+  /** Panel fijo para columna lateral (sin acordeón exterior). */
+  embedded?: boolean;
+  evaluationTypeName?: string | null;
+}) {
+  const typeKey = fixedKeyFor(evaluationTypeName);
+  const typeIntro = `Parámetros del proceso híbrido (heurísticas + LLM). Los valores por defecto de prompts y pistas están definidos en código para ${typeKey}; los campos editables aquí son overrides de ese tipo.`;
+
+  if (embedded) {
+    return (
+      <div className="flex min-h-0 flex-col">
+        <h4 className="mb-2 shrink-0 text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400">
+          Estrategia de extracción
+        </h4>
+        <p className={`mb-2 ${fieldHintClass}`}>{typeIntro}</p>
+        <ExtractConfigFieldsContent
+          extract={extract}
+          onChange={onChange}
+          evaluationTypeName={evaluationTypeName}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <details className="mt-2 rounded border border-gray-200 bg-gray-50 p-2 dark:border-gray-600 dark:bg-gray-900/40" open>
+      <summary className="cursor-pointer text-xs font-semibold uppercase text-gray-600 dark:text-gray-400">
+        Estrategia de extracción (global)
+      </summary>
+      <p className={`mt-2 ${fieldHintClass}`}>{typeIntro}</p>
+      <div className="mt-2">
+        <ExtractConfigFieldsContent
+          extract={extract}
+          onChange={onChange}
+          evaluationTypeName={evaluationTypeName}
+        />
       </div>
     </details>
   );
@@ -428,27 +511,36 @@ export function ElementStrategyFields({
       <div className="text-xs font-semibold text-gray-600 dark:text-gray-400">
         Estrategia de este elemento
       </div>
-      <label className="flex items-center gap-2 text-xs">
-        <input
-          type="checkbox"
-          checked={!!s.skipDeterministic}
-          onChange={(e) => onChange({ ...s, skipDeterministic: e.target.checked })}
-        />
-        Omitir extracción determinista (solo LLM)
-      </label>
-      <label className="block text-xs">
-        Hints LLM adicionales
+      <p className={fieldHintClass}>
+        Ajustes opcionales que sobrescriben o refinan la estrategia global solo para este elemento al extraer el
+        proyecto.
+      </p>
+      <div className="text-xs">
+        <label className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={!!s.skipDeterministic}
+            onChange={(e) => onChange({ ...s, skipDeterministic: e.target.checked })}
+          />
+          <span className="font-medium text-gray-700 dark:text-gray-200">Omitir extracción determinista (solo LLM)</span>
+        </label>
+        <p className={fieldHintClass}>{ELEMENT_STRATEGY_HINTS.skipDeterministic}</p>
+      </div>
+      <ConfigFieldLabel title="Hints LLM adicionales" hint={ELEMENT_STRATEGY_HINTS.llmHints}>
         <textarea
           className={textareaClass}
           rows={3}
           value={s.llmHints ?? ""}
           onChange={(e) => onChange({ ...s, llmHints: e.target.value })}
         />
-      </label>
-      <label className="block text-xs">
-        Métodos preferidos (separados por coma: heuristic, form_row, gantt, indicators, rag_llm, vision)
+      </ConfigFieldLabel>
+      <ConfigFieldLabel
+        title="Métodos preferidos (heuristic, form_row, gantt, indicators, rag_llm, vision)"
+        hint={ELEMENT_STRATEGY_HINTS.preferredMethods}
+      >
         <input
           className={inputClass}
+          placeholder="heuristic, rag_llm"
           value={(s.preferredMethods ?? []).join(", ")}
           onChange={(e) =>
             onChange({
@@ -464,7 +556,26 @@ export function ElementStrategyFields({
             })
           }
         />
-      </label>
+      </ConfigFieldLabel>
+      <ConfigFieldLabel
+        title="Prioridad de hojas (nombres separados por coma)"
+        hint={ELEMENT_STRATEGY_HINTS.sheetPriority}
+      >
+        <input
+          className={inputClass}
+          placeholder="Resumen Proyecto, Indicadores"
+          value={(s.sheetPriority ?? []).join(", ")}
+          onChange={(e) =>
+            onChange({
+              ...s,
+              sheetPriority: e.target.value
+                .split(",")
+                .map((x) => x.trim())
+                .filter(Boolean),
+            })
+          }
+        />
+      </ConfigFieldLabel>
     </div>
   );
 }

@@ -14,9 +14,12 @@ import {
 } from "@/lib/knowledge-index-cache";
 import type { RetrievedChunk } from "@/lib/chunk-types";
 import { sanitizeLlmEvaluationText } from "@/lib/llm-output-sanitize";
+import { looksLikeCompleteIgipReport } from "@/lib/report-completeness";
 
 export type EvaluateStreamResult = {
   reportContent: string;
+  reportDraft: string;
+  reportComplete: boolean;
   subdimensionScores: Record<string, number | null>;
   overallScore: number | null;
   evaluationSummary: string;
@@ -37,12 +40,6 @@ function progressToTrace(message: string): AgentTraceEntry {
   };
 }
 
-/**
- * El servidor solo usa texto/score de los fragmentos precomputados.
- * Sin embeddings el POST cabe en el límite de body de Vercel (~4,5 MB);
- * con topK alto + muchas subdimensiones el payload con vectores lo supera
- * y la respuesta falla con un error vacío ([Error: ]).
- */
 function stripEmbeddingsForWire(
   map: Record<string, RetrievedChunk[]>
 ): Record<string, RetrievedChunk[]> {
@@ -77,15 +74,73 @@ function formatEvaluateHttpError(
   return `Error al evaluar (HTTP ${status}). Revisa los logs de Vercel o inténtalo de nuevo.`;
 }
 
+async function retryFormatReport(params: {
+  evaluationTypeId: number;
+  projectElementsTable: { element: string; content: string }[];
+  rawEvaluation: string;
+  subdimensionScores?: Record<string, number | null>;
+  overallScore?: number | null;
+  signal?: AbortSignal;
+}): Promise<{
+  reportContent: string;
+  evaluationSummary: string;
+  subdimensionScores: Record<string, number | null>;
+  overallScore: number | null;
+}> {
+  const res = await fetch("/api/format-report", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      evaluationTypeId: params.evaluationTypeId,
+      projectElementsTable: params.projectElementsTable,
+      rawEvaluation: params.rawEvaluation,
+      subdimensionScores: params.subdimensionScores,
+      overallScore: params.overallScore,
+    }),
+    signal: params.signal,
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as {
+      message?: string;
+      error?: string;
+    };
+    throw new Error(
+      err.message || err.error || `Error al formatear informe (HTTP ${res.status})`
+    );
+  }
+  const data = (await res.json()) as {
+    reportContent?: string;
+    evaluationSummary?: string;
+    subdimensionScores?: Record<string, number | null>;
+    overallScore?: number | null;
+  };
+  if (!data.reportContent?.trim()) {
+    throw new Error("El reintento de formateo no devolvió informe.");
+  }
+  return {
+    reportContent: formatReportContent(data.reportContent),
+    evaluationSummary: data.evaluationSummary?.trim() ?? "",
+    subdimensionScores: data.subdimensionScores ?? {},
+    overallScore: data.overallScore ?? null,
+  };
+}
+
+export type EvaluateScoresUpdate = {
+  subdimensionScores: Record<string, number | null>;
+  /** null mientras corre la evaluación; se informa al cerrar el informe final. */
+  overallScore: number | null;
+};
+
 export async function runEvaluateStream(params: {
   evaluationTypeId: number;
   projectElementsTable: { element: string; content: string }[];
   onTraceUpdate?: (trace: AgentTraceEntry[]) => void;
   onIndexProgress?: (progress: KnowledgeIndexProgress) => void;
-  /** Se llama al recibir cada report_content (borrador o final). */
+  onReportDraft?: (content: string) => void;
   onReportContent?: (content: string) => void;
+  /** Notas por subdimensión en vivo; overallScore solo tras el informe final. */
+  onScoresUpdate?: (scores: EvaluateScoresUpdate) => void;
   signal?: AbortSignal;
-  /** Índice ya cargado (p. ej. lote masivo). */
   knowledgeChunks?: import("@/lib/chunk-types").StoredChunk[];
 }): Promise<EvaluateStreamResult> {
   const bulkConfig = await fetchBulkEvaluationConfig();
@@ -139,17 +194,79 @@ export async function runEvaluateStream(params: {
   let buffer = "";
   let streamState = createEvaluateStreamState();
   let reportContent = "";
+  let reportDraft = "";
+  let receivedReportContent = false;
   let subdimensionScores: Record<string, number | null> = {};
   let overallScore: number | null = null;
   let evaluationSummary = "";
-  let receivedDone = false;
 
-  const applyReportContent = (content: string) => {
+  const applyDraft = (content: string) => {
+    const formatted = formatReportContent(content);
+    reportDraft = formatted;
+    if (formatted.trim()) params.onReportDraft?.(formatted);
+  };
+
+  const applyFinal = (content: string) => {
     const formatted = formatReportContent(content);
     reportContent = formatted;
-    if (formatted.trim()) {
-      params.onReportContent?.(formatted);
+    if (formatted.trim()) params.onReportContent?.(formatted);
+  };
+
+  const handleEvent = (event: EvaluateStreamEvent, live: boolean) => {
+    if (event.type === "error") {
+      throw new Error(event.error?.trim() || "Error en el pipeline de evaluación");
     }
+    if (event.type === "report_draft") {
+      applyDraft(event.content);
+      streamState = applyEvaluateStreamEvent(streamState, event, live);
+      params.onTraceUpdate?.(
+        streamState.trace.map((t, i) => ({
+          ...t,
+          live: i === streamState.trace.length - 1 && t.live,
+        }))
+      );
+      return;
+    }
+    if (event.type === "report_content") {
+      receivedReportContent = true;
+      applyFinal(event.content);
+      return;
+    }
+    if (event.type === "evaluation_scores") {
+      subdimensionScores = { ...event.payload.subdimensionScores };
+      // Conservar overall para el resultado final, pero no exponerlo a la UI aún.
+      overallScore = event.payload.overallScore;
+      params.onScoresUpdate?.({
+        subdimensionScores: { ...subdimensionScores },
+        overallScore: null,
+      });
+    }
+    if (event.type === "subdimension_score") {
+      const key = `${event.dimension} / ${event.name}`;
+      subdimensionScores[key] = event.score;
+      params.onScoresUpdate?.({
+        subdimensionScores: { ...subdimensionScores },
+        overallScore: null,
+      });
+    }
+    if (event.type === "scores_summary") {
+      subdimensionScores = { ...event.subdimensionScores };
+      overallScore = event.overallScore;
+      params.onScoresUpdate?.({
+        subdimensionScores: { ...subdimensionScores },
+        overallScore,
+      });
+    }
+    if (event.type === "evaluation_summary") {
+      evaluationSummary = event.text;
+    }
+    streamState = applyEvaluateStreamEvent(streamState, event, live);
+    params.onTraceUpdate?.(
+      streamState.trace.map((t, i) => ({
+        ...t,
+        live: i === streamState.trace.length - 1 && t.live,
+      }))
+    );
   };
 
   while (true) {
@@ -161,89 +278,65 @@ export async function runEvaluateStream(params: {
     for (const line of lines) {
       const event = parseEvaluateNdjsonLine(line);
       if (!event) continue;
-      if (event.type === "error") {
-        throw new Error(event.error?.trim() || "Error en el pipeline de evaluación");
-      }
-      if (event.type === "report_content") {
-        applyReportContent(event.content);
-        continue;
-      }
-      if (event.type === "done") {
-        receivedDone = true;
-      }
-      if (event.type === "subdimension_score") {
-        const key = `${event.dimension} / ${event.name}`;
-        subdimensionScores[key] = event.score;
-      }
-      if (event.type === "scores_summary") {
-        subdimensionScores = { ...event.subdimensionScores };
-        overallScore = event.overallScore;
-      }
-      if (event.type === "evaluation_summary") {
-        evaluationSummary = event.text;
-      }
-      streamState = applyEvaluateStreamEvent(streamState, event, true);
-      params.onTraceUpdate?.(
-        streamState.trace.map((t, i) => ({
-          ...t,
-          live: i === streamState.trace.length - 1 && t.live,
-        }))
-      );
+      handleEvent(event, true);
     }
   }
 
   if (buffer.trim()) {
     const event = parseEvaluateNdjsonLine(buffer);
-    if (event) {
-      if (event.type === "error") {
-        throw new Error(event.error?.trim() || "Error en el pipeline de evaluación");
+    if (event) handleEvent(event, false);
+  }
+
+  const needsFormatRetry = !receivedReportContent && !!reportDraft.trim();
+
+  if (needsFormatRetry) {
+    params.onTraceUpdate?.([
+      ...streamState.trace.map((t) => ({ ...t, live: false })),
+      progressToTrace("Reintentando formateo del informe (sin re-evaluar subdimensiones)…"),
+    ]);
+    try {
+      const formatted = await retryFormatReport({
+        evaluationTypeId: params.evaluationTypeId,
+        projectElementsTable: params.projectElementsTable,
+        rawEvaluation: reportDraft || reportContent,
+        subdimensionScores,
+        overallScore,
+        signal: params.signal,
+      });
+      reportContent = formatted.reportContent;
+      if (formatted.evaluationSummary) evaluationSummary = formatted.evaluationSummary;
+      if (Object.keys(formatted.subdimensionScores).length > 0) {
+        subdimensionScores = formatted.subdimensionScores;
       }
-      if (event.type === "report_content") {
-        applyReportContent(event.content);
-      }
-      if (event.type === "done") {
-        receivedDone = true;
-      }
-      if (event.type === "scores_summary") {
-        subdimensionScores = { ...event.subdimensionScores };
-        overallScore = event.overallScore;
-      }
-      if (event.type === "evaluation_summary") {
-        evaluationSummary = event.text;
-      }
-      if (event.type !== "report_content") {
-        streamState = applyEvaluateStreamEvent(streamState, event, false);
-      }
+      if (formatted.overallScore != null) overallScore = formatted.overallScore;
+      params.onReportContent?.(reportContent);
+      params.onScoresUpdate?.({
+        subdimensionScores: { ...subdimensionScores },
+        overallScore,
+      });
+    } catch (e) {
+      throw new Error(
+        e instanceof Error
+          ? e.message
+          : "El formateo del informe se interrumpió y el reintento falló. Reintente la evaluación."
+      );
     }
   }
 
-  if (!reportContent.trim()) {
+  if (!reportContent.trim() || !looksLikeCompleteIgipReport(reportContent)) {
     throw new Error(
-      "La evaluación se interrumpió antes de generar el informe (suele ocurrir por timeout en plan Hobby de Vercel). Reintente o use plan Pro."
+      "La evaluación no generó un informe completo (faltan resumen, síntesis o notas). Reintente la evaluación."
     );
-  }
-
-  let finalTrace = streamState.trace.map((t) => ({ ...t, live: false }));
-  if (!receivedDone) {
-    finalTrace = [
-      ...finalTrace,
-      {
-        id: `partial-${Date.now()}`,
-        kind: "step" as const,
-        title:
-          "Informe parcial: el formateo final se cortó (posible timeout). Revise el panel derecho.",
-        detail: "",
-        live: false,
-      },
-    ];
   }
 
   return {
     reportContent,
+    reportDraft,
+    reportComplete: true,
     subdimensionScores,
     overallScore,
     evaluationSummary,
-    trace: finalTrace,
+    trace: streamState.trace.map((t) => ({ ...t, live: false })),
   };
 }
 

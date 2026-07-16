@@ -4,6 +4,8 @@ import {
   saveProjectStructuredIndex,
 } from "@/lib/project-structured-index";
 
+import type { ExtractConfig } from "@/lib/evaluation-type-settings";
+
 export type IngestProjectResult = {
   chunkCount: number;
   structuredFileCount: number;
@@ -14,10 +16,14 @@ export type IngestProjectResult = {
  */
 export async function ingestProjectFiles(
   sessionId: string,
-  filePaths: string[]
+  filePaths: string[],
+  extractConfig?: ExtractConfig
 ): Promise<IngestProjectResult> {
   const structured = await buildProjectStructuredIndex(filePaths);
   saveProjectStructuredIndex(sessionId, structured);
-  const { chunkCount } = await indexProjectFiles(sessionId, filePaths);
+  const { chunkCount } = await indexProjectFiles(sessionId, filePaths, {
+    projectIndex: extractConfig?.projectIndex,
+    vision: extractConfig?.vision,
+  });
   return { chunkCount, structuredFileCount: structured.files.length };
 }

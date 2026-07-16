@@ -2,7 +2,6 @@
 
 import type { ReportCustomSection, ReportFormatConfig } from "@/lib/report-format-config";
 import {
-  DEFAULT_SUBDIMENSION_EVAL_INSTRUCTIONS,
   DEFAULT_VARIABLE_EVAL_INSTRUCTIONS,
   listRubricFormatRows,
   newReportSectionId,
@@ -151,8 +150,9 @@ export default function ReportFormatEditor({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1 text-xs">
       <p className="shrink-0 text-gray-500 dark:text-gray-400">
-        Estructura y longitud del informe final. Los límites de caracteres se aplican en el paso de
-        formateo (§6), no durante la evaluación técnica (§5).
+        Estructura y longitud del informe final. Los límites de caracteres del formateo LLM aplican a
+        resumen, dimensiones, síntesis y secciones libres. Las evaluaciones por subdimensión se
+        copian literalmente del borrador del paso 4 (sin segundo formateo).
       </p>
 
       <section className="min-h-0 shrink-0 space-y-2">
@@ -228,60 +228,37 @@ export default function ReportFormatEditor({
               </label>
             </div>
 
-            <div className="rounded border border-gray-200 bg-white/60 p-2 dark:border-gray-600 dark:bg-gray-900/50">
+            <div className="rounded border border-amber-200 bg-amber-50/50 p-2 dark:border-amber-900/50 dark:bg-amber-950/20">
               <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
                 <span className="font-medium text-gray-800 dark:text-gray-200">
                   Evaluación por subdimensión ({subdimensionRows.length})
                 </span>
-                <CharLimitsEditor
-                  minChars={synced.subdimensionEvalLimits.minChars}
-                  maxChars={synced.subdimensionEvalLimits.maxChars}
-                  onChange={(minChars, maxChars) =>
-                    onChange({ ...synced, subdimensionEvalLimits: { minChars, maxChars } })
-                  }
-                />
-              </div>
-              <label className="block">
-                <span className="mb-0.5 block text-[10px] uppercase tracking-wide text-gray-500">
-                  Contenido en el informe final
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-medium text-amber-800 dark:bg-amber-900/60 dark:text-amber-200">
+                  Copia literal — paso 4
                 </span>
-                <textarea
-                  className={`${inputClass} min-h-[88px] resize-y`}
-                  value={synced.subdimensionEvalInstructions}
-                  onChange={(e) =>
-                    onChange({ ...synced, subdimensionEvalInstructions: e.target.value })
-                  }
-                />
-              </label>
-              <button
-                type="button"
-                className={`${btnClass} mt-1 text-gray-500`}
-                onClick={() =>
-                  onChange({
-                    ...synced,
-                    subdimensionEvalInstructions: DEFAULT_SUBDIMENSION_EVAL_INSTRUCTIONS,
-                  })
-                }
-              >
-                Restaurar texto sugerido
-              </button>
+              </div>
+              <p className="text-[10px] leading-relaxed text-amber-900/90 dark:text-amber-200/90">
+                El informe inserta aquí el texto generado en la evaluación por subdimensión, sin
+                reformatear ni recortar. Para cambiar el contenido, ajusta los{" "}
+                <strong>prompts de evaluación</strong> y la <strong>orientación opcional</strong> del
+                paso 4.
+              </p>
             </div>
           </>
         ) : rubric.type === "niveles" && variableRows.length > 0 ? (
           <>
-            <div className="rounded border border-gray-200 bg-white/60 p-2 dark:border-gray-600 dark:bg-gray-900/50">
+            <div className="rounded border border-amber-200 bg-amber-50/50 p-2 dark:border-amber-900/50 dark:bg-amber-950/20">
               <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
                 <span className="font-medium text-gray-800 dark:text-gray-200">
                   Evaluación por variable ({variableRows.length})
                 </span>
-                <CharLimitsEditor
-                  minChars={synced.subdimensionEvalLimits.minChars}
-                  maxChars={synced.subdimensionEvalLimits.maxChars}
-                  onChange={(minChars, maxChars) =>
-                    onChange({ ...synced, subdimensionEvalLimits: { minChars, maxChars } })
-                  }
-                />
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[9px] font-medium text-amber-800 dark:bg-amber-900/60 dark:text-amber-200">
+                  Copia literal — paso 4
+                </span>
               </div>
+              <p className="mb-2 text-[10px] leading-relaxed text-amber-900/90 dark:text-amber-200/90">
+                Igual que las subdimensiones en IGIP: el texto del paso 4 se inserta sin reformatear.
+              </p>
               <textarea
                 className={`${inputClass} min-h-[72px] resize-y`}
                 value={synced.subdimensionEvalInstructions}

@@ -17,6 +17,11 @@ import type { StoredChunk } from "@/lib/chunk-types";
 
 export type BulkProjectStatus = "pending" | "running" | "done" | "error";
 
+export type BulkProjectElementRow = {
+  element: string;
+  content: string;
+};
+
 export type BulkProjectRow = {
   id: string;
   fileName: string;
@@ -24,6 +29,8 @@ export type BulkProjectRow = {
   file: File;
   extractionStatus: BulkProjectStatus;
   evaluationStatus: BulkProjectStatus;
+  /** Tabla de elementos extraídos del proyecto (persistida para el chat masivo). */
+  elementsTable: BulkProjectElementRow[];
   subdimensionScores: Record<string, number | null>;
   overallScore: number | null;
   summary: string;
@@ -108,6 +115,7 @@ export function useBulkEvaluation(
         file,
         extractionStatus: "pending",
         evaluationStatus: "pending",
+        elementsTable: [],
         subdimensionScores: {},
         overallScore: null,
         summary: "",
@@ -233,22 +241,30 @@ export function useBulkEvaluation(
             (trace) => syncAgent("extracting", trace)
           );
 
-          const projectName = extractProjectName(extractResult.elementsTable, file.name);
+          const elementsTable = extractResult.elementsTable.map((r) => ({
+            element: r.element,
+            content: r.content,
+          }));
+          const projectName = extractProjectName(elementsTable, file.name);
           updateRow(rowId, {
             extractionStatus: "done",
             projectName,
+            elementsTable,
             evaluationStatus: "running",
           });
           patchAgentSlot(rowId, { projectName, status: "evaluating" });
 
           const evalResult = await runEvaluateStream({
             evaluationTypeId: activeTypeId,
-            projectElementsTable: extractResult.elementsTable.map((r) => ({
-              element: r.element,
-              content: r.content,
-            })),
+            projectElementsTable: elementsTable,
             knowledgeChunks: sharedKnowledgeChunks,
             onTraceUpdate: (trace) => syncAgent("evaluating", trace),
+            onScoresUpdate: ({ subdimensionScores, overallScore }) => {
+              updateRow(rowId, {
+                subdimensionScores,
+                ...(overallScore != null ? { overallScore } : {}),
+              });
+            },
             signal: controller.signal,
           });
 
@@ -259,6 +275,10 @@ export function useBulkEvaluation(
             reportContent: evalResult.reportContent,
             summary: evalResult.evaluationSummary,
           });
+
+          if (!evalResult.reportComplete) {
+            throw new Error("Informe incompleto tras la evaluación.");
+          }
 
           patchAgentSlot(rowId, {
             status: "done",

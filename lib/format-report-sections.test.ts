@@ -3,9 +3,11 @@ import { describe, it } from "node:test";
 import {
   buildSectionFormatSystemPrompt,
   estimateSectionMaxTokens,
+  isLightTruncationOnly,
   isSectionTextComplete,
   isSectionTextTruncated,
   resolveSectionSource,
+  sectionAcceptsLightTruncation,
 } from "@/lib/format-report-sections";
 import {
   defaultReportFormatPonderaciones,
@@ -107,6 +109,23 @@ Más texto.`;
     assert.equal(isSectionTextTruncated("Texto que termina bien."), false);
     assert.equal(isSectionTextTruncated("Texto que termina mal en ofreciendo"), true);
     assert.equal(isSectionTextTruncated("No"), true);
+    assert.equal(isSectionTextTruncated("Párrafo completo.\n\n**Nota: 3**"), false);
+    assert.equal(isSectionTextTruncated("Lista con cierre (ver punto 2)."), false);
+    assert.equal(
+      isSectionTextTruncated("Cierre limpio en párrafo final. ---"),
+      false,
+      "no debe marcar como truncado si termina con separador markdown ---"
+    );
+    assert.equal(
+      isSectionTextTruncated("Otro párrafo cerrado con punto.\n\n---"),
+      false,
+      "separador markdown en línea propia también debe ignorarse"
+    );
+    assert.equal(
+      isSectionTextTruncated("Texto colgado sin punto ---"),
+      true,
+      "sin punto antes del separador sigue siendo truncado"
+    );
   });
 
   it("isSectionTextComplete exige longitud mínima y cierre", () => {
@@ -127,5 +146,30 @@ Más texto.`;
       .map((s) => s.id);
     assert.ok(subIds.every((id) => id.startsWith("sub_eval_")));
     assert.equal(subIds[0], subdimensionEvalId(rubric.dimensions[0].subdimensions[0].id));
+  });
+
+  it("dimension overview usa maxChars como objetivo suave", () => {
+    const sections = expandReportSections(rubric, fmt);
+    const overview = sections.find((s) => s.kind === "dimension_overview");
+    assert.ok(overview);
+    const prompt = buildSectionFormatSystemPrompt(overview!, rubric);
+    assert.match(prompt, /Mínimo obligatorio/i);
+    assert.match(prompt, /Objetivo aproximado/i);
+    assert.match(prompt, /350|700/);
+  });
+
+  it("isLightTruncationOnly detecta fragmento corto final con minChars cumplido", () => {
+    const section = {
+      id: "dim_overview_x",
+      title: "Dimensión: Novedad",
+      description: "test",
+      minChars: 350,
+      maxChars: 700,
+      kind: "dimension_overview" as const,
+    };
+    const padding = "a".repeat(360);
+    const text = `## ${section.title}\n\n${padding}\n\nfragmento`;
+    assert.equal(sectionAcceptsLightTruncation(section), true);
+    assert.equal(isLightTruncationOnly(section, text), true);
   });
 });
