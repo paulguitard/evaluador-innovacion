@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { ensureFixedEvaluationTypes } from "@/lib/eval-types/ensure-fixed-types";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     const types = await ensureFixedEvaluationTypes();

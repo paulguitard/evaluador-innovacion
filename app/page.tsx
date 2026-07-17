@@ -18,6 +18,7 @@ import { useProjectExtract } from "@/hooks/useProjectExtract";
 import { useBulkEvaluation } from "@/hooks/useBulkEvaluation";
 import { isIncompleteElement } from "@/lib/project-extract-validate";
 import { exportBulkResultsExcel, exportBulkResultsZip } from "@/lib/bulk-export";
+import { parseResponseJson } from "@/lib/fetch-json";
 
 type EvaluationType = { id: number; name: string };
 
@@ -49,6 +50,7 @@ function parseElementoContenido(text: string): [string, string][] {
 export default function Home() {
   const [evaluationTypes, setEvaluationTypes] = useState<EvaluationType[]>([]);
   const [activeTypeId, setActiveTypeId] = useState<number | null>(null);
+  const [typesLoadError, setTypesLoadError] = useState<string | null>(null);
   const [evaluationMode, setEvaluationMode] = useState<EvaluationMode>("bulk");
   const [configOpen, setConfigOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -138,19 +140,31 @@ export default function Home() {
 
   useEffect(() => {
     let cancelled = false;
+    setTypesLoadError(null);
     fetch("/api/evaluation-types")
-      .then((r) => r.json())
-      .then((data) => {
+      .then(async (r) => {
+        const data = await parseResponseJson<EvaluationType[] | { error?: string }>(r);
         if (cancelled) return;
+        if (!r.ok) {
+          const msg =
+            data && typeof data === "object" && "error" in data && data.error
+              ? String(data.error)
+              : `Error ${r.status}`;
+          setTypesLoadError(msg);
+          return;
+        }
         if (Array.isArray(data)) {
           setEvaluationTypes(data);
           setActiveTypeId((prev) => prev ?? (data.length > 0 ? data[0].id : null));
-        } else if (data?.error) {
-          console.error("Error cargando tipos de evaluación:", data.error);
+        } else if (data && typeof data === "object" && "error" in data && data.error) {
+          setTypesLoadError(String(data.error));
         }
       })
       .catch((err) => {
-        if (!cancelled) console.error("Error cargando tipos de evaluación:", err);
+        if (!cancelled) {
+          setTypesLoadError(err instanceof Error ? err.message : String(err));
+          console.error("Error cargando tipos de evaluación:", err);
+        }
       });
     return () => {
       cancelled = true;
@@ -234,6 +248,14 @@ export default function Home() {
         evaluationMode={evaluationMode}
         onEvaluationModeChange={setEvaluationMode}
       />
+      {typesLoadError && (
+        <div
+          role="alert"
+          className="shrink-0 border-b border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
+        >
+          No se pudieron cargar los tipos de evaluación: {typesLoadError}
+        </div>
+      )}
       <ResizableSplitPane
         defaultLeftPercent={45}
         left={

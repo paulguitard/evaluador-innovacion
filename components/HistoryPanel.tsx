@@ -10,6 +10,7 @@ import {
   sanitizeFileName,
 } from "@/lib/evaluation-pdf";
 import { exportHistoryExcel } from "@/lib/bulk-export";
+import { parseResponseJson } from "@/lib/fetch-json";
 import ReportMarkdownView from "@/components/ReportMarkdownView";
 
 type HistoryListItem = {
@@ -106,8 +107,13 @@ export default function HistoryPanel({
     setError(null);
     try {
       const res = await fetch("/api/evaluation-history?limit=100");
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || `Error ${res.status}`);
+      const data = await parseResponseJson<{ error?: string } & HistoryListItem[]>(res);
+      if (!res.ok) {
+        throw new Error(
+          (data && typeof data === "object" && "error" in data && data.error) ||
+            `Error ${res.status}`
+        );
+      }
       const rows = Array.isArray(data) ? data : [];
       setItems(
         rows.map((r: HistoryListItem) => ({
@@ -147,7 +153,7 @@ export default function HistoryPanel({
     setShowReport(false);
     fetch(`/api/evaluation-history/${selectedId}`)
       .then(async (res) => {
-        const data = await res.json();
+        const data = await parseResponseJson<HistoryDetail & { error?: string }>(res);
         if (!res.ok) throw new Error(data?.error || `Error ${res.status}`);
         if (cancelled) return;
         setDetail({
@@ -209,7 +215,7 @@ export default function HistoryPanel({
       const res = await fetch(`/api/evaluation-history/${selectedId}`, {
         method: "DELETE",
       });
-      const data = await res.json().catch(() => null);
+      const data = await parseResponseJson<{ error?: string } | null>(res).catch(() => null);
       if (!res.ok) throw new Error(data?.error || `Error ${res.status}`);
       setSelectedId(null);
       setDetail(null);
@@ -252,7 +258,7 @@ export default function HistoryPanel({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectName: nextName }),
       });
-      const data = await res.json().catch(() => null);
+      const data = await parseResponseJson<{ error?: string } | null>(res).catch(() => null);
       if (!res.ok) throw new Error(data?.error || `Error ${res.status}`);
       setItems((prev) =>
         prev.map((row) =>

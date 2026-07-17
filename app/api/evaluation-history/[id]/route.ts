@@ -5,6 +5,8 @@ import {
   updateEvaluationHistoryProjectName,
 } from "@/lib/db";
 
+export const dynamic = "force-dynamic";
+
 type RouteContext = { params: Promise<{ id: string }> };
 
 function parseId(raw: string): number | null {

@@ -6,6 +6,8 @@ import {
 } from "@/lib/db";
 import type { RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
 
+export const dynamic = "force-dynamic";
+
 type HistoryPostBody = Partial<EvaluationHistoryCreateInput> & {
   evaluationTypeId?: number | null;
   evaluationTypeName?: string;
