@@ -266,6 +266,8 @@ export default function Home() {
             reportContent={reportContent}
             onReportContentChange={setReportContent}
             activeTypeId={activeTypeId}
+            evaluationTypeName={activeTypeName}
+            scoreSchema={scoreSchema}
             projectFilePaths={projectFilePaths}
             onProjectFilePathsChange={setProjectFilePaths}
             projectFiles={projectFiles}

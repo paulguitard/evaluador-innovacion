@@ -25,6 +25,10 @@ import { createStaggeredTraceReveal } from "@/lib/trace-reveal";
 import { stripCharacterLimitAnnotations } from "@/lib/report-format-limits";
 import type { EvaluationMode } from "@/lib/evaluation-mode";
 import { countBulkIgnoredFiles, filterBulkProjectFiles } from "@/lib/evaluation-mode";
+import {
+  extractProjectNameFromElements,
+  saveEvaluationToHistory,
+} from "@/lib/evaluation-history-client";
 
 export type ChatMessage = {
   role: "user" | "assistant";
@@ -78,6 +82,8 @@ export default function ChatPanel({
   reportContent,
   onReportContentChange,
   activeTypeId,
+  evaluationTypeName = "",
+  scoreSchema = [],
   projectFilePaths,
   onProjectFilePathsChange,
   projectFiles,
@@ -100,6 +106,8 @@ export default function ChatPanel({
   reportContent: string;
   onReportContentChange: (content: string) => void;
   activeTypeId: number | null;
+  evaluationTypeName?: string;
+  scoreSchema?: RubricScoreSchemaEntry[];
   projectFilePaths: string[];
   onProjectFilePathsChange: (paths: string[]) => void;
   projectFiles: File[];
@@ -383,6 +391,31 @@ export default function ChatPanel({
       if (result.reportContent) {
         onReportContentChange(result.reportContent);
       }
+
+      try {
+        const fileName = projectFiles[0]?.name || "proyecto";
+        const projectName = extractProjectNameFromElements(
+          projectElementsTable ?? [],
+          fileName
+        );
+        await saveEvaluationToHistory({
+          evaluationTypeId: activeTypeId,
+          evaluationTypeName: evaluationTypeName || "Evaluación",
+          projectName,
+          fileName,
+          reportContent: result.reportContent,
+          subdimensionScores: result.subdimensionScores,
+          overallScore: result.overallScore,
+          summary: result.evaluationSummary,
+          scoreSchema,
+        });
+      } catch (saveErr) {
+        const saveMsg =
+          saveErr instanceof Error ? saveErr.message : String(saveErr);
+        console.error("No se pudo guardar en historial:", saveMsg);
+        evaluateCompletionPendingRef.current = `${formatEvaluateCompletionMessage()} Historial no guardado: ${saveMsg}`;
+      }
+
       appendEvaluateCompletion();
     } catch (e) {
       evaluateCompletionPendingRef.current = null;

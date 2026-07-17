@@ -4,7 +4,6 @@ import { useState, useRef, useCallback } from "react";
 import type { ChatMessage } from "@/components/ChatPanel";
 import type { BulkAgentSlot, BulkAgentSlotStatus } from "@/components/BulkAgentPanel";
 import type { AgentTraceEntry } from "@/lib/agent-events";
-import { fileBaseName } from "@/lib/evaluation-mode";
 import { runExtractStream } from "@/lib/run-extract-stream";
 import { runEvaluateStream } from "@/lib/run-evaluate-stream";
 import { getLastStreamLine } from "@/lib/stream-line";
@@ -15,6 +14,11 @@ import {
 } from "@/lib/knowledge-index-cache";
 import type { StoredChunk } from "@/lib/chunk-types";
 import type { RubricScoreSchemaEntry } from "@/lib/evaluation-scores";
+import { fileBaseName } from "@/lib/evaluation-mode";
+import {
+  extractProjectNameFromElements,
+  saveEvaluationToHistory,
+} from "@/lib/evaluation-history-client";
 
 export type BulkProjectStatus = "pending" | "running" | "done" | "error";
 
@@ -47,18 +51,6 @@ async function cleanupSession(sessionId: string): Promise<void> {
   }).catch(() => {});
 }
 
-function extractProjectName(
-  elementsTable: { element: string; content: string }[],
-  fileName: string
-): string {
-  const row = elementsTable.find(
-    (r) => r.element.toLowerCase().trim() === "nombre del proyecto"
-  );
-  const content = row?.content?.trim();
-  if (content && content !== "—" && content.length > 0) return content;
-  return fileBaseName(fileName);
-}
-
 async function extractWithFile(
   file: File,
   sessionId: string,
@@ -77,28 +69,6 @@ async function extractWithFile(
 
 function rowIdForFile(index: number, fileName: string): string {
   return `bulk-${index}-${fileName}`;
-}
-
-async function saveEvaluationToHistory(payload: {
-  evaluationTypeId: number;
-  evaluationTypeName: string;
-  projectName: string;
-  fileName: string;
-  reportContent: string;
-  subdimensionScores: Record<string, number | null>;
-  overallScore: number | null;
-  summary: string;
-  scoreSchema: RubricScoreSchemaEntry[];
-}): Promise<void> {
-  const res = await fetch("/api/evaluation-history", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const data = (await res.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(data?.error || `Error al guardar historial (${res.status})`);
-  }
 }
 
 export function useBulkEvaluation(
@@ -274,7 +244,7 @@ export function useBulkEvaluation(
             element: r.element,
             content: r.content,
           }));
-          const projectName = extractProjectName(elementsTable, file.name);
+          const projectName = extractProjectNameFromElements(elementsTable, file.name);
           updateRow(rowId, {
             extractionStatus: "done",
             projectName,
