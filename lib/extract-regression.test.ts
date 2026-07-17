@@ -7,6 +7,7 @@ import type { ExcelStructuredData } from "@/lib/excel-structured-extract";
 import { allowFallbackOverwrite, isCanonicalExtraction } from "@/lib/extract-source-policy";
 import {
   bitacoraAguaConectaFixture,
+  bitacoraDigitalizaTuNegocioFixture,
   BITACORA_GOLDEN,
 } from "@/lib/extract-regression.fixture";
 import { plainTextToStructuredData } from "@/lib/excel-structured-extract";
@@ -185,6 +186,14 @@ describe("golden bitácora — extractores determinísticos (libs base)", () => 
     const detected = detectProjectName(fixture, []);
     assert.ok(detected);
     assert.match(detected!.text, /Agua Conecta/i);
+    assert.ok(detected!.score >= 42);
+  });
+
+  it("nombre IGIP: título fila 1, no placeholder ID VINCULAMOS", () => {
+    const detected = detectProjectName([bitacoraDigitalizaTuNegocioFixture()], []);
+    assert.ok(detected);
+    assert.match(detected!.text, /Digitaliza tu negocio/i);
+    assert.doesNotMatch(detected!.text, /No registrada/i);
     assert.ok(detected!.score >= 42);
   });
 });

@@ -34,6 +34,12 @@ export function getIgipElementHints(element: ElementDef): string[] {
   const hints: string[] = [];
   const t = elementText(element);
 
+  if (/nombre del proyecto/i.test(element.title)) {
+    hints.push(
+      'En bitácoras IGIP, el nombre suele ser el título fusionado de la primera fila de "Resumen Proyecto" (barra superior). No uses el valor de "ID VINCULAMOS" ni placeholders como "No registrada".'
+    );
+  }
+
   if (/necesidad|problema|oportunidad/i.test(element.title)) {
     hints.push(
       'Busca la fila cuya etiqueta contiene "Necesidad, problema u oportunidad". El texto puede ocupar varias columnas fusionadas en la hoja "Resumen Proyecto".'

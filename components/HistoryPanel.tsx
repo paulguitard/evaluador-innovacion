@@ -9,6 +9,7 @@ import {
   generateEvaluationPdfBlob,
   sanitizeFileName,
 } from "@/lib/evaluation-pdf";
+import { exportHistoryExcel } from "@/lib/bulk-export";
 import ReportMarkdownView from "@/components/ReportMarkdownView";
 
 type HistoryListItem = {
@@ -90,6 +91,7 @@ export default function HistoryPanel({
   const [editingId, setEditingId] = useState<number | null>(null);
   const [draftName, setDraftName] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [excelBusy, setExcelBusy] = useState(false);
 
   const tableSchema = useMemo(() => unionScoreSchema(items), [items]);
 
@@ -186,6 +188,19 @@ export default function HistoryPanel({
     }
   };
 
+  const handleDownloadExcel = async () => {
+    if (items.length === 0) return;
+    setExcelBusy(true);
+    setError(null);
+    try {
+      await exportHistoryExcel(items, tableSchema, indicatorLabel);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExcelBusy(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (selectedId == null) return;
     if (!window.confirm("¿Eliminar esta evaluación del historial?")) return;
@@ -266,17 +281,27 @@ export default function HistoryPanel({
         className="flex h-[94vh] w-[98vw] max-w-[1800px] flex-col rounded-lg border border-gray-200 bg-white shadow-xl dark:border-gray-700 dark:bg-[#252526]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-gray-200 px-6 py-4 dark:border-gray-600">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-gray-200 px-6 py-4 dark:border-gray-600">
           <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
             Historial de evaluaciones
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10"
-          >
-            Cerrar
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void handleDownloadExcel()}
+              disabled={excelBusy || loading || items.length === 0}
+              className="rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-800 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-500 dark:text-gray-100 dark:hover:bg-white/10"
+            >
+              {excelBusy ? "Generando…" : "Descargar Excel"}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-white/10"
+            >
+              Cerrar
+            </button>
+          </div>
         </div>
 
         {error && (

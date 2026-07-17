@@ -1,5 +1,4 @@
-import type { ExcelStructuredData, ExcelSheet } from "@/lib/excel-structured-extract";
-import { normalizeForMatch } from "@/lib/text-match";
+import type { ExcelStructuredData, ExcelSheet, ExcelCell } from "@/lib/excel-structured-extract";
 import {
   isGanttColumnHeaderLabel,
   isLikelyGanttHeaderRowContent,
@@ -12,7 +11,6 @@ import {
   isQaColumnWorkbook,
   looksLikeFormPromptText,
 } from "@/lib/qa-column-extract";
-import { looksLikeFormLabel } from "@/lib/form-row-extract";
 
 export type ProjectNameCandidate = {
   text: string;
@@ -25,6 +23,18 @@ const LABEL_LIKE =
 
 const NOISE_PATTERN =
   /^(https?:\/\/|www\.|@|%\s*de\s+avance|\d+\s*%$|bit[aá]cora|hoja:|fila\s+\d)/i;
+
+/** Placeholders típicos de bitácoras IGIP (p. ej. valor de "ID VINCULAMOS"). */
+const PLACEHOLDER_NAME =
+  /^(no\s+registrad[ao]s?|n\/?a|s\/?d|sin\s+(registro|informaci[oó]n|dato)s?|pendiente|null|-|—|–)$/i;
+
+/** Etiquetas de formulario / metadata, no títulos de proyecto. */
+const FORM_FIELD_LABEL_NAME =
+  /^(nombre\s+(del\s+)?(proyecto|emprendimiento)|modelo\s+de\s+negocio|descripci[oó]n\s+(del\s+)?(proyecto|emprendimiento|negocio)|id\s*vinculamos)$/i;
+
+/** Etiquetas de columna A en filas metadata de "Resumen Proyecto" (IGIP). */
+const IGIP_METADATA_LABEL =
+  /^(id\s*vinculamos|nombre\s+encargado|cargo\s+encargado|correo\s+encargado|sedes?|escuelas?|carreras?|comunas?|socios?\s+comunitarios?|l[ií]nea)$/i;
 
 function cleanDisplayName(raw: string): string {
   let t = raw.trim();
@@ -39,6 +49,8 @@ function isInvalidProjectName(text: string): boolean {
   const t = text.trim();
   if (t.length < 2 || t.length > 160) return true;
   if (NOISE_PATTERN.test(t)) return true;
+  if (PLACEHOLDER_NAME.test(t)) return true;
+  if (FORM_FIELD_LABEL_NAME.test(t)) return true;
   if (isGanttColumnHeaderLabel(t)) return true;
   if (isLikelyGanttHeaderRowContent(t)) return true;
   if (/^\d+([.,]\d+)?$/.test(t)) return true;
@@ -47,10 +59,18 @@ function isInvalidProjectName(text: string): boolean {
   if (LABEL_LIKE.test(t) && t.length < 35 && !/proyecto/i.test(t)) return true;
   if (/^objetivo\s+(general|espec)/i.test(t)) return true;
   if (looksLikeFormPromptText(t)) return true;
-  if (looksLikeFormLabel(t) && /describe|emprendimiento|proyecto|negocio|indica|cu[eé]ntanos/i.test(t)) {
-    return true;
-  }
+  // Solo prompts imperativos explícitos; no rechazar títulos cortos que contengan
+  // "negocio"/"proyecto" (p. ej. "Digitaliza tu negocio").
+  if (/^(describe|indica|cu[eé]ntanos)\b/i.test(t)) return true;
   return false;
+}
+
+/** Valor a la derecha de una etiqueta metadata IGIP (no es el título del proyecto). */
+function isIgipMetadataFieldValue(rowCells: ExcelCell[], cell: ExcelCell): boolean {
+  if (cell.col <= 1) return false;
+  const left = rowCells.find((c) => c.col === 1);
+  if (!left) return false;
+  return IGIP_METADATA_LABEL.test(left.value.trim());
 }
 
 function scoreTitleLikeText(
@@ -124,7 +144,11 @@ function collectCandidatesFromSheet(sheet: ExcelSheet, sheetIndex: number): Proj
 
     const validInRow = rowCells
       .map((c) => ({ cell: c, cleaned: cleanDisplayName(c.value) }))
-      .filter((x) => !isInvalidProjectName(x.cleaned));
+      .filter(
+        (x) =>
+          !isInvalidProjectName(x.cleaned) &&
+          !isIgipMetadataFieldValue(rowCells, x.cell)
+      );
     const maxLen = validInRow.reduce((m, x) => Math.max(m, x.cleaned.length), 0);
 
     for (const { cell, cleaned } of validInRow) {

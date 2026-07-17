@@ -64,6 +64,41 @@ export function bitacoraAguaConectaFixture(): ExcelStructuredData {
   };
 }
 
+/**
+ * Bitácora IGIP con título en A1:E1 y fila "ID VINCULAMOS" = "No registrada"
+ * (caso real: el placeholder no debe ganar al nombre del proyecto).
+ */
+export function bitacoraDigitalizaTuNegocioFixture(): ExcelStructuredData {
+  return {
+    fileName: "Bitácora Digitaliza tu negocio.xlsx",
+    sheets: [
+      {
+        sheetName: "Resumen Proyecto",
+        merges: [
+          { startRow: 1, startCol: 1, endRow: 1, endCol: 5 },
+          { startRow: 2, startCol: 2, endRow: 2, endCol: 4 },
+        ],
+        cells: [
+          { row: 1, col: 1, value: "Digitaliza tu negocio" },
+          { row: 2, col: 1, value: "ID VINCULAMOS" },
+          { row: 2, col: 2, value: "No registrada" },
+          { row: 3, col: 1, value: "Nombre Encargado" },
+          { row: 3, col: 2, value: "Jorge Guajardo Ibarra" },
+          { row: 4, col: 1, value: "Sede" },
+          { row: 4, col: 2, value: "San Bernardo" },
+          { row: 5, col: 1, value: "OBJETIVO GENERAL:" },
+          {
+            row: 5,
+            col: 2,
+            value:
+              "Desarrollar e implementar un sistema de ventas digital para el negocio del socio comunitario.",
+          },
+        ],
+      },
+    ],
+  };
+}
+
 /** Valores esperados (golden) para extractores determinísticos sobre la bitácora. */
 export const BITACORA_GOLDEN: Record<string, { minLength: number; mustMatch?: RegExp; mustNotMatch?: RegExp }> = {
   "Continuidad de fases anteriores": {

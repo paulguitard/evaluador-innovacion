@@ -59,6 +59,70 @@ export async function exportBulkResultsExcel(
   downloadBlob(blob, `evaluacion-masiva-${safeName}-${date}.xlsx`);
 }
 
+export type HistoryExportRow = {
+  id: number;
+  project_name: string;
+  evaluation_type_name: string;
+  created_at: string;
+  subdimension_scores: Record<string, number | null>;
+  overall_score: number | null;
+};
+
+export async function exportHistoryExcel(
+  rows: HistoryExportRow[],
+  schema: RubricScoreSchemaEntry[],
+  indicatorLabel: string
+): Promise<void> {
+  const ExcelJS = await import("exceljs");
+  const mod =
+    (ExcelJS as { default?: { Workbook?: unknown }; Workbook?: unknown }).default ?? ExcelJS;
+  const WorkbookCtor = (mod as { Workbook: new () => import("exceljs").Workbook }).Workbook;
+  const workbook = new WorkbookCtor();
+  const sheet = workbook.addWorksheet("Historial");
+
+  const headers = [
+    "ID",
+    "Nombre de proyecto",
+    "Tipo",
+    "Fecha",
+    ...schema.map((s) => s.name),
+    indicatorLabel,
+  ];
+  sheet.addRow(headers);
+
+  for (const row of rows) {
+    let fecha = row.created_at;
+    try {
+      fecha = new Date(row.created_at).toLocaleDateString("es-CL", { dateStyle: "short" });
+    } catch {
+      /* keep iso */
+    }
+    sheet.addRow([
+      row.id,
+      row.project_name,
+      row.evaluation_type_name,
+      fecha,
+      ...schema.map((s) => {
+        const score = row.subdimension_scores[s.key];
+        return score != null ? formatIndicatorScore(score) : "";
+      }),
+      row.overall_score != null ? formatIndicatorScore(row.overall_score) : "",
+    ]);
+  }
+
+  sheet.getRow(1).font = { bold: true };
+  sheet.columns.forEach((col, idx) => {
+    col.width = idx === 1 ? 40 : 18;
+  });
+
+  const date = new Date().toISOString().slice(0, 10);
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  downloadBlob(blob, `historial-evaluaciones-${date}.xlsx`);
+}
+
 export async function exportBulkResultsZip(
   rows: BulkProjectRow[],
   reportTitlePrefix: string
